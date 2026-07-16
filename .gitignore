@@ -1,0 +1,6 @@
+# Credentials must never be committed (subject: project failure otherwise)
+secrets/
+
+# Local runtime artifacts
+*.log
+.DS_Store
