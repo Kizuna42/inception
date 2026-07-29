@@ -48,15 +48,6 @@ wp user get "$WP_USER" --allow-root >/dev/null 2>&1 || wp user create \
 	--user_pass="$WP_USER_PASSWORD" \
 	--allow-root
 
-# Configure Redis only when the optional bonus service is discoverable.
-if getent hosts redis >/dev/null 2>&1; then
-	wp config set WP_REDIS_HOST redis --allow-root
-	wp config set WP_REDIS_PORT 6379 --raw --allow-root
-	wp plugin is-installed redis-cache --allow-root || wp plugin install redis-cache --activate --allow-root
-	wp plugin is-active redis-cache --allow-root || wp plugin activate redis-cache --allow-root
-	wp redis enable --allow-root || true
-fi
-
 # Give PHP-FPM ownership after any root-run wp-cli changes.
 chown -R www-data:www-data /var/www/html
 

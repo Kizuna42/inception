@@ -79,14 +79,6 @@ volumes:
       type: none
       o: bind
       device: ${DATA_PATH}/wordpress
-  # Reserved now so the backup bonus can attach without changing the storage contract.
-  backup_data:
-    name: backup_data
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${DATA_PATH}/backup
 
 secrets:
   db_root_password:
