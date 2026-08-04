@@ -134,6 +134,10 @@ docker exec -it wordpress sh -c \
   'mariadb -h mariadb -u"$MYSQL_USER" -p"$(cat /run/secrets/db_password)" "$MYSQL_DATABASE"'
 ```
 
+The inner double quotes are intentionally not backslash-escaped: they group the
+expanded values inside the single-quoted `sh -c` script without becoming literal
+characters in the MariaDB username, password, or database arguments.
+
 Inspect logs:
 
 ```sh
@@ -178,12 +182,12 @@ directories, so the next `make` starts from an empty state.
 
 1. If `/var/lib/mysql/mysql` does not exist yet, runs `mariadb-install-db` to
    initialize the data directory.
-2. If a `.inception-provisioned` marker file is absent, starts a temporary,
-   network-isolated (`--skip-networking`) `mariadbd` instance, waits (with a
-   bounded retry count) until it responds to `mariadb-admin ping`, then
-   creates the WordPress database and application user, sets the root
-   password from the mounted secret, shuts the temporary instance down, and
-   writes the marker so this step is skipped on subsequent starts.
+2. If a `.inception-provisioned` marker file is absent, runs `mariadbd` once in
+   foreground bootstrap mode with networking disabled (`--bootstrap
+   --skip-networking`). The bootstrap SQL creates the WordPress database and
+   application user and configures root authentication from the mounted
+   secrets. The script then writes the marker so this step is skipped on
+   subsequent starts. No server process is backgrounded during provisioning.
 3. Finally `exec`s the real `mariadbd` process as PID 1.
 
 **WordPress entrypoint** (`srcs/requirements/wordpress/tools/entrypoint.sh`):

@@ -17,25 +17,9 @@ if [ ! -d /var/lib/mysql/mysql ]; then
 fi
 
 if [ ! -f "$PROVISION_MARKER" ]; then
-	# Start a local-only temporary server so bootstrap SQL is never exposed on the network.
-	mariadbd --user=mysql --skip-networking &
-	temp_pid=$!
-
-	# Use a finite retry because the subject forbids infinite service-wait loops.
-	i=0
-	until mariadb-admin ping --silent >/dev/null 2>&1; do
-		i=$((i + 1))
-		if [ "$i" -ge 30 ]; then
-			echo "MariaDB bootstrap server did not become ready" >&2
-			kill "$temp_pid" 2>/dev/null || true
-			wait "$temp_pid" 2>/dev/null || true
-			exit 1
-		fi
-		sleep 1
-	done
-
-	# Provision the application database and its least-scope application user.
-	mariadb -u root <<-SQL
+	# Bootstrap directly in the foreground without exposing or backgrounding a server.
+	mariadbd --user=mysql --bootstrap --skip-networking <<-SQL
+		FLUSH PRIVILEGES;
 		CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`;
 		CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'%' IDENTIFIED BY '${DB_PASS}';
 		ALTER USER '${MYSQL_USER}'@'%' IDENTIFIED BY '${DB_PASS}';
@@ -44,9 +28,6 @@ if [ ! -f "$PROVISION_MARKER" ]; then
 		FLUSH PRIVILEGES;
 	SQL
 
-	# Keep socket administration while also allowing the generated root password when required.
-	mariadb-admin shutdown
-	wait "$temp_pid"
 	touch "$PROVISION_MARKER"
 fi
 
