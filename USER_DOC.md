@@ -109,8 +109,8 @@ make ps
 ```
 
 shows the state of the three Compose services (`nginx`, `wordpress`,
-`mariadb`). A healthy stack shows all three as `Up` (MariaDB additionally
-shows `healthy` once its healthcheck passes).
+`mariadb`). A healthy stack shows all three as `Up`; MariaDB and WordPress also
+show `healthy` once their healthchecks pass.
 
 Equivalently, `docker ps` lists the running containers, their images, and
 their published ports (only `nginx` should show `443` mapped to the host).
@@ -132,6 +132,7 @@ curl -k https://kishino.42.fr
 certificate.) A successful response returns the site's HTML.
 
 Internally, MariaDB is checked with a Docker healthcheck (`mariadb-admin
-ping`, run periodically inside the container); the WordPress container is
-configured to only start once that healthcheck reports MariaDB as healthy, so
-if WordPress is running at all, its database dependency was ready first.
+ping`, run periodically inside the container). WordPress starts only after
+MariaDB is healthy, and nginx starts only after WordPress's PHP-FPM port is
+listening, so `make` does not report completion while the web backend is still
+unready.

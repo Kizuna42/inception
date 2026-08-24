@@ -43,6 +43,12 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q ':2328 .* 0A ' /proc/net/tcp /proc/net/tcp6"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   nginx:
     build: ./requirements/nginx
@@ -56,7 +62,7 @@ services:
       - wordpress_data:/var/www/html:ro
     depends_on:
       wordpress:
-        condition: service_started
+        condition: service_healthy
 
 networks:
   inception:

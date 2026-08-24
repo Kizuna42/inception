@@ -19,8 +19,8 @@ done
 # Keep all WordPress state on the persistent named volume.
 cd /var/www/html
 
-# Download the frozen core version only when the volume is empty.
-[ -f wp-load.php ] || wp core download --version=7.0.1 --allow-root
+# Use the frozen ZIP release so long core paths are not truncated by the tar extractor.
+[ -f wp-load.php ] || wp core download https://wordpress.org/wordpress-7.1.zip --allow-root
 
 # Generate configuration once while keeping the database password out of the image.
 [ -f wp-config.php ] || wp config create \

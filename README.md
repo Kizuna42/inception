@@ -92,12 +92,12 @@ configuration and command in the project. AI assistance was used for:
 - Running repeatable static, container, TLS, persistence, crash-recovery, and
   browser checks on an isolated UTM validation VM.
 
-The mandatory stack was validated on UTM Ubuntu 24.04.4 LTS (aarch64). The checks
+The mandatory stack was validated in an isolated Docker environment. The checks
 covered a fresh build and startup, HTTPS-only access, TLS 1.2/1.3, database
 connectivity, the administrator and author accounts, administrator authentication,
 named-volume persistence across `make down`/`make`, automatic recovery after
-service crashes and a VM reboot, and rendering the site and login page in Chrome.
-These checks should still be repeated on the final evaluation VM.
+service exits, and rendering the site and login page in Chrome. These checks, plus
+a full VM reboot, must still be repeated on the final evaluation VM.
 
 ## Project description
 

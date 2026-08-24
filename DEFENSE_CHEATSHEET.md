@@ -3,7 +3,7 @@
 > 42 Inception の評価当日に、上から順に操作・説明するための実戦用資料。
 > 正本は `inception.pdf` Version 5.3 と
 > [42 EvalHub — Inception](https://www.42evalhub.com/common/inception)。
-> この資料の基準スナップショットは 2026-08-02。
+> この資料の基準スナップショットは 2026-08-24。
 
 ## 0. 最初に見るページ
 
@@ -103,12 +103,12 @@ flowchart LR
 
 | 確認対象 | パス・現在行 | locator |
 |---|---|---|
-| Compose 3 services | `srcs/docker-compose.yml:3-59` | `grep -nE '^  (mariadb|wordpress|nginx):' srcs/docker-compose.yml` |
-| image名・restart・network | `srcs/docker-compose.yml:7-10,27-30,50-53` | `grep -nE 'image:|restart:|networks:' srcs/docker-compose.yml` |
-| nginx公開ポート | `srcs/docker-compose.yml:54` | `grep -n 'ports:' srcs/docker-compose.yml` |
-| volume mount | `srcs/docker-compose.yml:15-16,41-42,55-56` | `grep -nE 'mariadb_data|wordpress_data' srcs/docker-compose.yml` |
-| named volume host path | `srcs/docker-compose.yml:66-81` | `grep -nE 'driver_opts|device:' srcs/docker-compose.yml` |
-| Docker secrets | `srcs/docker-compose.yml:83-89` | `grep -nE '^secrets:|file:' srcs/docker-compose.yml` |
+| Compose 3 services | `srcs/docker-compose.yml:3-65` | `grep -nE '^  (mariadb|wordpress|nginx):' srcs/docker-compose.yml` |
+| image名・restart・network | `srcs/docker-compose.yml:7-10,27-30,56-59` | `grep -nE 'image:|restart:|networks:' srcs/docker-compose.yml` |
+| nginx公開ポート | `srcs/docker-compose.yml:60` | `grep -n 'ports:' srcs/docker-compose.yml` |
+| volume mount | `srcs/docker-compose.yml:15-16,41-42,61-62` | `grep -nE 'mariadb_data|wordpress_data' srcs/docker-compose.yml` |
+| named volume host path | `srcs/docker-compose.yml:72-87` | `grep -nE 'driver_opts|device:' srcs/docker-compose.yml` |
+| Docker secrets | `srcs/docker-compose.yml:89-95` | `grep -nE '^secrets:|file:' srcs/docker-compose.yml` |
 | Make entrypoint | `Makefile:6-10` | `grep -nE '^all:|^up:' Makefile` |
 | 非破壊停止 | `Makefile:12-14` | `grep -nA2 '^down:' Makefile` |
 | 破壊的clean | `Makefile:16-26` | `grep -nE '^clean:|^fclean:|^re:' Makefile` |
@@ -119,7 +119,7 @@ flowchart LR
 | MariaDB PID 1 | `srcs/requirements/mariadb/tools/entrypoint.sh:35` | `grep -n 'exec mariadbd' srcs/requirements/mariadb/tools/entrypoint.sh` |
 | WordPress image | `srcs/requirements/wordpress/Dockerfile` | `nl -ba srcs/requirements/wordpress/Dockerfile` |
 | PHP-FPM port | `srcs/requirements/wordpress/conf/www.conf:4` | `grep -n 'listen' srcs/requirements/wordpress/conf/www.conf` |
-| WordPress初期化 | `srcs/requirements/wordpress/tools/entrypoint.sh:19-49` | `grep -nE 'wp core|wp config|wp user' srcs/requirements/wordpress/tools/entrypoint.sh` |
+| WordPress初期化 | `srcs/requirements/wordpress/tools/entrypoint.sh:22-49` | `grep -nE 'wp core|wp config|wp user' srcs/requirements/wordpress/tools/entrypoint.sh` |
 | PHP-FPM PID 1 | `srcs/requirements/wordpress/tools/entrypoint.sh:58` | `grep -n 'exec.*php-fpm' srcs/requirements/wordpress/tools/entrypoint.sh` |
 | nginx image・証明書 | `srcs/requirements/nginx/Dockerfile:1-20` | `nl -ba srcs/requirements/nginx/Dockerfile` |
 | nginx TLS・port | `srcs/requirements/nginx/conf/nginx.conf:2-8` | `grep -nE 'listen|server_name|ssl_' srcs/requirements/nginx/conf/nginx.conf` |
@@ -590,6 +590,8 @@ docker compose -f srcs/docker-compose.yml up -d --build mariadb wordpress nginx
 
 > 起動順だけではreadyを保証しません。MariaDBにはhealthcheckを定義し、WordPressは
 > `condition: service_healthy` に依存します。WordPress entrypoint自身も有限回の実接続retryを行います。
+> WordPressにもPHP-FPMのport 9000 listenを確認するhealthcheckがあり、nginxはその
+> `service_healthy` を待つため、`make` 完了直後の502を防ぎます。
 
 ### Docker networkとhost networkの違いは？
 
@@ -700,7 +702,7 @@ curl -kvI https://kishino.42.fr
 - [ ] entrypointにbackground program、無限loopがない。
 - [ ] `docker compose config --quiet` が通る。
 - [ ] fresh `make` が通る。
-- [ ] 3 containerがUp、MariaDB healthy。
+- [ ] 3 containerがUp、MariaDBとWordPressがhealthy。
 - [ ] nginxだけ443をpublish。
 - [ ] TLS 1.2/1.3成功、1.0/1.1失敗。
 - [ ] WordPress install画面が出ない。

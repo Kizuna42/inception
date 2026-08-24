@@ -102,8 +102,8 @@ entry through the cloud-init hosts template.
 `docker-compose.yml` (in `srcs/`) declares the `inception` bridge network, the
 three services (each with an explicit `image:` tag, `restart: always`, and
 `depends_on` — WordPress waits for MariaDB's `service_healthy`, nginx waits
-for WordPress's `service_started`), the two named volumes, and the three
-secrets sourced from files in `../secrets/`.
+for WordPress's `service_healthy` after its PHP-FPM port starts listening), the
+two named volumes, and the three secrets sourced from files in `../secrets/`.
 
 ## Container and volume management cheatsheet
 
@@ -194,8 +194,9 @@ directories, so the next `make` starts from an empty state.
 
 1. Waits (bounded retries) until it can reach MariaDB with the application
    credentials.
-2. Downloads WordPress core into `/var/www/html` with `wp core download` only
-   if `wp-load.php` is not already present (i.e. only on an empty volume).
+2. Downloads the frozen WordPress 7.1 ZIP release into `/var/www/html` with
+   `wp core download` only if `wp-load.php` is not already present (i.e. only
+   on an empty volume).
 3. Creates `wp-config.php` with `wp config create` only if it does not exist
    yet.
 4. Runs `wp core install` only if `wp core is-installed` reports the site is
