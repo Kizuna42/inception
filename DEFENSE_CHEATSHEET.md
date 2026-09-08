@@ -3,7 +3,25 @@
 > 42 Inception の評価当日に、上から順に操作・説明するための実戦用資料。
 > 正本は `inception.pdf` Version 5.3 と
 > [42 EvalHub — Inception](https://www.42evalhub.com/common/inception)。
-> この資料の基準スナップショットは 2026-08-24。
+> 実機検証日は 2026-09-02。2026-09-08 にremoteと資料を再確認。
+
+### 最新提出版の厳格レビュー結果
+
+実機検証対象は commit `a358c6a19de86ff3339bbdb3b1aab0efa63e805a`。
+2026-09-08時点のGitHub既定branchは `main`。service実装はこの実機検証後に変更していない。
+
+| EvalHub項目 | 判定 | 2026-09-02の根拠 |
+|---|---|---|
+| Preliminaries / General instructions | PASS | secret追跡なし、必須fileあり、禁止patternなし、Compose config成功 |
+| Activity overview / README / Documentation | PASS | 必須説明、英語README、AI利用、USER_DOC、DEV_DOCを確認 |
+| Simple setup / Docker Basics | PASS | 専用UTM VMのfresh cloneから3 imageをbuildし3 container起動 |
+| Docker Network | PASS | `inception` bridgeに3 container、service nameのDNS解決成功 |
+| NGINX / TLS | PASS | port 80拒否、443成功、TLS 1.2/1.3成功、1.0/1.1拒否 |
+| WordPress / volume | PASS（UIは当日再実演） | 2 user、認証、comment、編集値、host pathを実測。dashboardのclick操作は提出直前に再実演する |
+| MariaDB / volume | PASS | app userで接続、12 table、host path、secret認証を実測 |
+| Persistence | PASS | container再作成と実VM再起動の両方で固有の編集・commentを保持 |
+| Configuration modification | PASS | nginx 443→8443をrebuild、8443成功・443拒否、その後443へrollback |
+| Bonus | 0 / 対象外 | 未実装。mandatoryを優先し、bonusは主張しない |
 
 ## 0. 最初に見るページ
 
@@ -50,6 +68,84 @@ docker compose -f srcs/docker-compose.yml config --quiet
 > EvalHub は評価開始時に全 container/image/volume/network を削除するコマンドを指定している。
 > これは **専用の評価VMだけ** で実行する。共有Macや別プロジェクトが動くDocker環境では実行しない。
 
+### 専用評価VMのfresh start
+
+まず時計を確認する。snapshot復帰直後の時計ずれは、GitHubやpackage repositoryのTLS検証を失敗させる。
+
+~~~sh
+date -Is
+timedatectl status
+curl -fsSI https://github.com | head -n1
+~~~
+
+`certificate is not yet valid` なら、VMの時計をhostの現在時刻へ直してからNTPを再有効化する。
+`YYYY-MM-DD HH:MM:SS` は実際の現在時刻へ置き換える。
+
+~~~sh
+sudo timedatectl set-ntp false
+sudo timedatectl set-time 'YYYY-MM-DD HH:MM:SS'
+sudo timedatectl set-ntp true
+timedatectl status
+~~~
+
+既存のbind dataはDocker volume削除だけでは消えない。fresh build確認前に、削除せず退避する。
+
+~~~sh
+timestamp=$(date +%Y%m%d-%H%M%S)
+[ ! -d /home/kishino/data ] || \
+  sudo mv /home/kishino/data "/home/kishino/data.pre-eval-$timestamp"
+~~~
+
+続いて、EvalHub指定の全削除を **専用評価VMでだけ** 実行する。対象が0件なら
+`requires at least 1 argument` が出ても、次のcommandへ進めばよい。
+
+~~~sh
+docker stop $(docker ps -qa); docker rm $(docker ps -qa); \
+docker rmi -f $(docker images -qa); docker volume rm $(docker volume ls -q); \
+docker network rm $(docker network ls -q) 2>/dev/null
+~~~
+
+最後に、本当に提出したremoteを空directoryへcloneする。GitHubの作業branchと42へ提出したcommitを
+混同しない。`SUBMISSION_URL` にはIntraに表示される提出先URLを入力する。
+
+~~~sh
+read -r -p '42 submission repository URL: ' SUBMISSION_URL
+check_root=$(mktemp -d "$HOME/inception-check.XXXXXX")
+git clone "$SUBMISSION_URL" "$check_root/inception"
+cd "$check_root/inception"
+git status -sb
+git log -1 --format='%H%n%cI%n%s'
+git remote -v
+~~~
+
+このcloneを評価対象として以後の `make` と確認を行う。
+
+### `/etc/hosts` を再起動後も保持する
+
+通常は `127.0.0.1 kishino.42.fr` を `/etc/hosts` に追加すればよい。ただしcloud-initが
+`manage_etc_hosts: true` のVMでは再起動時に消える。次のcommentが見えたらtemplateへ追加する。
+
+~~~sh
+head -n12 /etc/hosts
+sudo nano /etc/cloud/templates/hosts.debian.tmpl
+~~~
+
+`127.0.0.1 localhost` の直後へ次の1行を入れる。
+
+~~~text
+127.0.0.1 kishino.42.fr
+~~~
+
+反映と確認:
+
+~~~sh
+sudo cloud-init single --name update_etc_hosts --frequency always
+getent hosts kishino.42.fr
+sudo reboot
+~~~
+
+再ログイン後、`getent hosts kishino.42.fr` が `127.0.0.1` を返すことまで確認する。
+
 ### 当日の順番
 
 1. Git所有者・提出物・secret非追跡を確認。
@@ -61,6 +157,104 @@ docker compose -f srcs/docker-compose.yml config --quiet
 7. MariaDBへ接続し、DBが空でないことを確認。
 8. `make down && make`、続いてVM再起動で永続化を確認。
 9. reviewer指定の設定変更を行い、rebuild・restart・疎通確認。
+
+### 校舎での提出・評価手順
+
+#### 1. 校舎へ行く前
+
+提出remoteの既定branchへ最新commitをpushし、remote上のSHAまで一致させる。
+このGitHubを提出先にする場合は次を実行する。
+
+~~~sh
+git status -sb
+git diff --check
+git push origin HEAD:main
+local_sha=$(git rev-parse HEAD)
+remote_sha=$(git ls-remote origin refs/heads/main | cut -f1)
+printf 'local=%s\nremote=%s\n' "$local_sha" "$remote_sha"
+test "$local_sha" = "$remote_sha"
+~~~
+
+Intraに別の提出repository URLが表示される場合、GitHubへpushしただけでは提出にならない。
+必ずIntra指定remoteにも同じcommitをpushし、同様にSHAを照合する。
+
+Intraでは `Projects` から `Inception` を開き、表示されるGit repository URLを正本として使う。
+push後は評価枠の日時と場所を確認し、必要なcorrection pointsが足りることも確認する。
+pushしただけで評価予約まで完了したとはみなさない。ボタン名や画面構成が変わっている場合は、
+当日のIntra表示を優先する。
+
+#### 2. 校舎でVMを起動した直後
+
+評価専用VMを起動し、時計、空き容量、Docker、名前解決を確認する。
+
+~~~sh
+date -Is
+df -h /
+docker version --format '{{.Server.Version}}'
+docker compose version
+getent hosts kishino.42.fr
+~~~
+
+- VM内browserなら `kishino.42.fr` は `127.0.0.1` へ向ける。
+- host側browserなら、hostの `/etc/hosts` で `kishino.42.fr` をVMのIPv4へ向ける。
+- snapshot復帰後に時計がずれていたら、buildやcloneより先にNTPを直す。
+
+#### 3. 評価対象をfresh cloneする
+
+作業directoryではなく、Intraに登録したremoteを空directoryへcloneする。
+
+~~~sh
+read -r -p '42 submission repository URL: ' SUBMISSION_URL
+eval_root=$(mktemp -d "$HOME/inception-eval.XXXXXX")
+git clone "$SUBMISSION_URL" "$eval_root/inception"
+cd "$eval_root/inception"
+git status -sb
+git log -1 --format='%H%n%cI%n%s'
+git remote -v
+~~~
+
+ここで表示されるSHAが、提出前に照合したSHAと同じであることを確認する。
+
+#### 4. clean buildを実演する
+
+EvalHub指定のDocker全削除は、他プロジェクトがない評価専用VMでだけ実行する。
+bind dataはDocker volume削除では消えないため、既存dataを削除せず退避してから `make` する。
+
+~~~sh
+timestamp=$(date +%Y%m%d-%H%M%S)
+[ ! -d /home/kishino/data ] || \
+  sudo mv /home/kishino/data "/home/kishino/data.pre-eval-$timestamp"
+
+docker stop $(docker ps -qa); docker rm $(docker ps -qa); \
+docker rmi -f $(docker images -qa); docker volume rm $(docker volume ls -q); \
+docker network rm $(docker network ls -q) 2>/dev/null
+
+make
+docker compose -f srcs/docker-compose.yml ps
+curl -kfsSI https://kishino.42.fr
+~~~
+
+`make` はlocalの `secrets/` を自動生成する。passwordをGitへ追加しない。
+
+#### 5. peer evaluationで見せる順番
+
+1. rootの必須file、Git SHA、secret非追跡、禁止pattern不在。
+2. `make` と3 container、image、network、volume、443-only。
+3. browserでWordPress、comment追加、`kishino` のadmin dashboard編集。
+4. MariaDBのtable、WordPress userとrole。
+5. `make down && make` 後の永続化。
+6. VM reboot後の自動復旧と永続化。
+7. reviewer指定の設定変更、rebuild、旧状態と新状態の疎通比較。
+
+#### 校舎での注意点
+
+- 評価開始後は提出branchを更新しない。fresh cloneのSHAを評価者と最初に確認する。
+- secret値をterminal履歴、チャット、Git差分へ貼らない。必要ならlogin時だけ本人が参照する。
+- `make fclean` はbind dataも削除する。永続化確認用の投稿・comment作成後は実行しない。
+- Docker全削除commandを共有Macや他人のDocker環境で実行しない。
+- 自己署名certificateのbrowser警告は想定内。HTTPへ逃がさずHTTPSで続行する。
+- port変更は評価者が結果を確認するまでrollbackしない。
+- Bonusはmandatoryが完全PASSの場合だけ評価される。本提出ではBonusを主張しない。
 
 ## 1. アーキテクチャ
 
@@ -266,9 +460,11 @@ openssl s_client -connect kishino.42.fr:443 \
 
 ~~~sh
 openssl s_client -connect kishino.42.fr:443 \
-  -servername kishino.42.fr -tls1 </dev/null
+  -servername kishino.42.fr -tls1 -cipher 'ALL:@SECLEVEL=0' </dev/null 2>&1 \
+  | grep 'alert protocol version'
 openssl s_client -connect kishino.42.fr:443 \
-  -servername kishino.42.fr -tls1_1 </dev/null
+  -servername kishino.42.fr -tls1_1 -cipher 'ALL:@SECLEVEL=0' </dev/null 2>&1 \
+  | grep 'alert protocol version'
 ~~~
 
 期待:
@@ -277,6 +473,11 @@ openssl s_client -connect kishino.42.fr:443 \
 - TLS 1.0/1.1はhandshake失敗。
 - subject/SANに `kishino.42.fr`。
 - 自己署名警告は許容。暗号化していないこととは異なる。
+
+> OpenSSL 3で `-cipher 'ALL:@SECLEVEL=0'` を付けずに `no protocols available` となった場合、
+> それはclient側が古いprotocolを開始できなかっただけで、server拒否の証明ではない。
+> serverからの `alert protocol version` を確認する。`Cipher is (NONE)` 単独では、cipherや署名方式など
+> protocol version以外の不一致でも出るため証明に使わない。
 
 コード:
 
@@ -493,6 +694,10 @@ docker logs --tail 50 nginx
 #### 4. 新portを証明
 
 ~~~sh
+for i in $(seq 1 30); do
+  curl -kfsSI https://kishino.42.fr:8443 >/dev/null 2>&1 && break
+  sleep 1
+done
 curl -kfsSI https://kishino.42.fr:8443
 openssl s_client -connect kishino.42.fr:8443 \
   -servername kishino.42.fr -tls1_2 </dev/null 2>/dev/null \
@@ -694,6 +899,7 @@ curl -kvI https://kishino.42.fr
 ### 提出前
 
 - [ ] `git status -sb` を説明できる。
+- [ ] 42へ実際に提出したremoteを空directoryへcloneし、提出SHAを確認した。
 - [ ] secret実値がGit履歴・tracked fileにない。
 - [ ] root必須5点: `Makefile`、`srcs/`、`README.md`、`USER_DOC.md`、`DEV_DOC.md`。
 - [ ] 禁止pattern検査が空。
@@ -712,7 +918,10 @@ curl -kvI https://kishino.42.fr
 - [ ] named volumeのdeviceが `/home/kishino/data/...`。
 - [ ] `make down && make` で変更保持。
 - [ ] VM reboot後も復帰・保持。
+- [ ] VMの時計が正しく、GitHubへのTLS検証が成功する。
+- [ ] cloud-init利用VMでは `kishino.42.fr` がreboot後も名前解決できる。
 - [ ] reviewer指定port変更をrebuild・restart・疎通まで練習済み。
+- [ ] browserでcomment追加とadmin dashboard編集を本人の操作で再確認した。
 - [ ] Bonusは実装していないため主張しない。
 
 ### 口頭防御

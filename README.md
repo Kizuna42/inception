@@ -77,27 +77,19 @@ for end-user details and `DEV_DOC.md` for developer-facing operations.
 
 ### Use of AI assistance
 
-AI assistants (Claude/Codex) were used as development and verification tools. The
-author remains responsible for understanding, reviewing, and defending every
-configuration and command in the project. AI assistance was used for:
-
-- Reviewing the overall container/network/volume design against the subject
-  requirements before writing any file.
-- Drafting configuration snippets (Dockerfiles, `nginx.conf`, entrypoint scripts,
-  `docker-compose.yml`) which were then read, adjusted, and tested by hand.
-- Cross-checking the implementation against the subject text to catch missed
-  mandatory requirements (e.g. TLS-only nginx, no `latest` tag, no
-  infinite-loop/`tail -f`/`sleep infinity` hacks, non-`admin` admin username).
-- Drafting and correcting `README.md`, `USER_DOC.md`, and `DEV_DOC.md`.
-- Running repeatable static, container, TLS, persistence, crash-recovery, and
-  browser checks on an isolated UTM validation VM.
+AI assistants (Claude/Codex) were used in a supporting role. They helped compare
+the project with the subject, suggest repeatable verification commands, review
+some configuration drafts, and organize the documentation. The author inspected,
+adjusted, and tested every retained change and remains responsible for
+understanding and defending the complete project.
 
 The mandatory stack was validated in an isolated Docker environment. The checks
 covered a fresh build and startup, HTTPS-only access, TLS 1.2/1.3, database
 connectivity, the administrator and author accounts, administrator authentication,
 named-volume persistence across `make down`/`make`, automatic recovery after
-service exits, and rendering the site and login page in Chrome. These checks, plus
-a full VM reboot, must still be repeated on the final evaluation VM.
+service exits, and rendering the site and login page in Chrome. These checks,
+including a full VM reboot, were repeated on a dedicated UTM validation VM and
+should be run once more from the submitted clone before the peer evaluation.
 
 ## Project description
 
