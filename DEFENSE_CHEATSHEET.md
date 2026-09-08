@@ -1,956 +1,458 @@
 # Inception Defense Cheat Sheet
 
-> 42 Inception の評価当日に、上から順に操作・説明するための実戦用資料。
-> 正本は `inception.pdf` Version 5.3 と
-> [42 EvalHub — Inception](https://www.42evalhub.com/common/inception)。
-> 実機検証日は 2026-09-02。2026-09-08 にremoteと資料を再確認。
+[42 EvalHub — Inception](https://www.42evalhub.com/common/inception) の評価順に、判定条件を落とさず日本語で整理した学習・実演用の一枚。
+**「評価項目」は原文の要旨訳、「本実装／口頭説明」はこのリポジトリへの対応と補足**。実演結果は当日確認する。
 
-### 最新提出版の厳格レビュー結果
+## 0. 読み方と実演の前提
 
-実機検証対象は commit `a358c6a19de86ff3339bbdb3b1aab0efa63e805a`。
-2026-09-08時点のGitHub既定branchは `main`。service実装はこの実機検証後に変更していない。
+コマンドは **Linux 評価 VM のリポジトリルート**で実行する。`$` は付けずにコピーできる。
+以下の関数を最初に定義する。**再ログイン・別ターミナルでは再定義**する。
 
-| EvalHub項目 | 判定 | 2026-09-02の根拠 |
-|---|---|---|
-| Preliminaries / General instructions | PASS | secret追跡なし、必須fileあり、禁止patternなし、Compose config成功 |
-| Activity overview / README / Documentation | PASS | 必須説明、英語README、AI利用、USER_DOC、DEV_DOCを確認 |
-| Simple setup / Docker Basics | PASS | 専用UTM VMのfresh cloneから3 imageをbuildし3 container起動 |
-| Docker Network | PASS | `inception` bridgeに3 container、service nameのDNS解決成功 |
-| NGINX / TLS | PASS | port 80拒否、443成功、TLS 1.2/1.3成功、1.0/1.1拒否 |
-| WordPress / volume | PASS（UIは当日再実演） | 2 user、認証、comment、編集値、host pathを実測。dashboardのclick操作は提出直前に再実演する |
-| MariaDB / volume | PASS | app userで接続、12 table、host path、secret認証を実測 |
-| Persistence | PASS | container再作成と実VM再起動の両方で固有の編集・commentを保持 |
-| Configuration modification | PASS | nginx 443→8443をrebuild、8443成功・443拒否、その後443へrollback |
-| Bonus | 0 / 対象外 | 未実装。mandatoryを優先し、bonusは主張しない |
+```sh
+dc() { docker compose -f srcs/docker-compose.yml "$@"; }
+wp() { dc exec -T -w /var/www/html wordpress wp "$@" --allow-root; }
+```
 
-## 0. 最初に見るページ
+| 本実装の名前 | 値／役割 |
+|---|---|
+| URL／管理画面 | `https://kishino.42.fr` ／ `/wp-admin/` |
+| Compose service／container | `nginx`、`wordpress`、`mariadb` |
+| image | `nginx:kishino`、`wordpress:kishino`、`mariadb:kishino` |
+| DB／DB 接続ユーザー | `wordpress` ／ `wpuser` |
+| WordPress アカウント | `kishino`：administrator、`guest`：author |
+| network／volume | `inception` ／ `wordpress_data`、`mariadb_data` |
+| 実データ | `/home/kishino/data/wordpress`、`/home/kishino/data/mariadb` |
 
-### 評価停止条件
+### Introduction / Guidelines — 評価の姿勢・共通ルール
 
-次のどれかがあれば、その場で修正せず評価が終了し得る。
+**評価項目：** 礼節を守って不具合を議論し、仕様の解釈差に配慮して公平に評価する。評価対象は提出 Git の内容だけ。
+本人・リポジトリ・課題を照合し、空ディレクトリへ clone する。alias による偽装がないか確認し、評価補助スクリプトは一緒に読む。
+未履修の評価者は subject 全文を読む。空提出・動作不能・Norm 違反等は該当 flag で終了・0 点、不正は -42 点。
+不正以外では、終了後も間違いを振り返ることが推奨される。
 
-- Git に credential、API key、password が追跡されている。
-- ルートに `Makefile`、`srcs/`、`README.md`、`USER_DOC.md`、`DEV_DOC.md` がない。
-- Compose に `network_mode: host`、`links:`、Docker 利用スクリプトに `--link` がある。
-- network 定義がない。
-- Dockerfile／entrypoint がプログラムをバックグラウンド実行する。
-- `tail -f`、`sleep infinity`、無限ループでコンテナを維持する。
-- service ごとの自作 Dockerfile、penultimate stable の Debian/Alpine、service と同名の image が成立しない。
-- `make` で3サービスが起動しない。
-- HTTP、TLS、WordPress、volume、database、persistence、設定変更のいずれかが機能しない。
+**説明：**「補助テストの PASS だけに頼らず、提出コード・設定・実際の応答を対応させて説明します。」
 
-### 90秒プレフライト
+## 1. Preliminary tests — 提出物・本人・秘密情報
 
-~~~sh
+**評価項目：** 本人が立ち会い、本人の station で提出 Git を clone する。未提出・ファイル／場所／名前の誤りは 0 点で終了。
+ローカル `.env` や Docker secrets の利用は許可されるが、評価中に作成する secrets ファイル以外に、Git リポジトリ内の認証情報・API key・password があれば 0 点で終了。
+不正が疑われた場合は慎重に判断し、Cheat flag で評価を止める。
+
+```sh
 git status -sb
-git remote get-url origin | sed -E 's#(https?://)[^/@]+@#\1[REDACTED]@#'
+git log -1 --format='%h %s'
+git ls-files Makefile srcs README.md USER_DOC.md DEV_DOC.md
 git ls-files secrets
-git check-ignore -v secrets/db_root_password.txt \
-  secrets/db_password.txt secrets/credentials.txt
-find srcs/requirements -path '*/tools/*.sh' -exec sh -n {} \;
-grep -RInE 'network_mode:[[:space:]]*host|links:|--link' \
-  Makefile srcs || true
-grep -RInE 'tail[[:space:]]+-f|sleep[[:space:]]+infinity|while[[:space:]]+true' \
-  Makefile srcs || true
-grep -RInE '[[:space:]]&[[:space:]]*($|#)' \
-  srcs/requirements/*/tools || true
-docker compose -f srcs/docker-compose.yml config --quiet
-~~~
+git check-ignore secrets/db_root_password.txt secrets/db_password.txt secrets/credentials.txt
+git log --all --oneline -- secrets
+```
 
-期待値:
+**期待結果：** 必須提出物あり、`git ls-files secrets` は空、3 ファイルが ignore 対象。履歴に secrets があれば調査する。
+ignore とファイル名の検査だけでは「別名のファイルや過去 commit に秘密がない」とは証明できない。提出差分・履歴も確認し、秘密値を画面共有やログへ出さない。
 
-- `git ls-files secrets` は出力なし。
-- 禁止パターン3検査も出力なし。
-- shell syntax と Compose config は終了コード0。
-- `git status` の差分は、評価対象として提出した内容と一致する。
+**口頭説明：**「`srcs/.env` はドメインや DB 名などの非機密設定です。password は `make secrets` がローカル生成し、Git 管理外の `secrets/` から必要な container だけへ渡します。」
 
-> [!CAUTION]
-> EvalHub は評価開始時に全 container/image/volume/network を削除するコマンドを指定している。
-> これは **専用の評価VMだけ** で実行する。共有Macや別プロジェクトが動くDocker環境では実行しない。
+**周辺知識：** `.gitignore` は既に tracked のファイルや履歴を消さない。Compose の file-based secrets は `/run/secrets/` への読み取り専用 mount で、ローカル元ファイルを暗号化保管する機能ではない。
+本実装は生成元を mode `600` にするが、アプリが読む必要はあり、DB password は永続 `wp-config.php` にも保存される。
+既存 DB／WordPress の password は secret ファイルを書き換えるだけでは変更されない。
 
-### 専用評価VMのfresh start
+## 2. General instructions — 構成・禁止事項・起動
 
-まず時計を確認する。snapshot復帰直後の時計ずれは、GitHubやpackage repositoryのTLS検証を失敗させる。
+**評価項目：** 不明な確認方法は被評価者が説明する。root に `Makefile`、アプリ設定一式を置く `srcs/` が必要。
+Compose に明示的な `network(s)` が必要で、host network・`links:`・スクリプトの `--link` は禁止。
+各 image は Alpine または Debian の **直前の stable 系列**をベースにする。
+Dockerfile／entrypoint でのバックグラウンド起動、単なる `bash`／`sh`、`tail -f`、`sleep infinity`、無限ループによる延命は禁止。
+スクリプトを実行するための shell は許可される。違反なら終了し、条件を確認したら Makefile を実行する。
 
-~~~sh
-date -Is
-timedatectl status
-curl -fsSI https://github.com | head -n1
-~~~
+```sh
+cat Makefile srcs/docker-compose.yml
+cat srcs/requirements/*/Dockerfile
+cat srcs/requirements/*/tools/entrypoint.sh
+rg -n 'network_mode:.*host|links:|--link|tail .* -f|tail -f|sleep infinity|while true' Makefile srcs
+find srcs/requirements -name '*.sh' -exec sh -n {} \;
+dc config --quiet
+```
 
-`certificate is not yet valid` なら、VMの時計をhostの現在時刻へ直してからNTPを再有効化する。
-`YYYY-MM-DD HH:MM:SS` は実際の現在時刻へ置き換える。
+**期待結果：** 禁止パターンの検索は空、構文チェックは成功。検索は見落としもあるので script 本文と終了条件まで読む。
+`rg` が VM にない場合は同じパターンを `grep -RnE` で検索する。
+本実装は全て `FROM debian:12`。2026-09-08 確認の Debian は 13 が stable、12 が oldstable（前 stable）；評価日にも [公式 release 一覧](https://www.debian.org/releases/) と照合する。
 
-~~~sh
-sudo timedatectl set-ntp false
-sudo timedatectl set-time 'YYYY-MM-DD HH:MM:SS'
-sudo timedatectl set-ntp true
-timedatectl status
-~~~
+### 評価開始時の全削除と fresh build
 
-既存のbind dataはDocker volume削除だけでは消えない。fresh build確認前に、削除せず退避する。
+**評価項目：** 評価開始前に以下の Docker リソース全削除を実行する。
+**これは専用評価 VM 限定。他プロジェクトの container・image・volume・network も対象になる。**
+既存データを残す必要がある場合、先に `make down` で停止してから `/home/kishino/data` を別名へ退避する。稼働中の DB ディレクトリは移動しない。
 
-~~~sh
-timestamp=$(date +%Y%m%d-%H%M%S)
-[ ! -d /home/kishino/data ] || \
-  sudo mv /home/kishino/data "/home/kishino/data.pre-eval-$timestamp"
-~~~
-
-続いて、EvalHub指定の全削除を **専用評価VMでだけ** 実行する。対象が0件なら
-`requires at least 1 argument` が出ても、次のcommandへ進めばよい。
-
-~~~sh
+```sh
+# EvalHub 指定。専用評価 VM で対象を確認してから実行する。
 docker stop $(docker ps -qa); docker rm $(docker ps -qa); \
 docker rmi -f $(docker images -qa); docker volume rm $(docker volume ls -q); \
 docker network rm $(docker network ls -q) 2>/dev/null
-~~~
+```
 
-最後に、本当に提出したremoteを空directoryへcloneする。GitHubの作業branchと42へ提出したcommitを
-混同しない。`SUBMISSION_URL` にはIntraに表示される提出先URLを入力する。
+対象 0 件や既定 network の削除ではエラーが出る場合がある。bind 元のデータは volume 削除だけでは消えないため、これだけで「空データから起動した」とは言えない。
 
-~~~sh
-read -r -p '42 submission repository URL: ' SUBMISSION_URL
-check_root=$(mktemp -d "$HOME/inception-check.XXXXXX")
-git clone "$SUBMISSION_URL" "$check_root/inception"
-cd "$check_root/inception"
-git status -sb
-git log -1 --format='%H%n%cI%n%s'
-git remote -v
-~~~
-
-このcloneを評価対象として以後の `make` と確認を行う。
-
-### `/etc/hosts` を再起動後も保持する
-
-通常は `127.0.0.1 kishino.42.fr` を `/etc/hosts` に追加すればよい。ただしcloud-initが
-`manage_etc_hosts: true` のVMでは再起動時に消える。次のcommentが見えたらtemplateへ追加する。
-
-~~~sh
-head -n12 /etc/hosts
-sudo nano /etc/cloud/templates/hosts.debian.tmpl
-~~~
-
-`127.0.0.1 localhost` の直後へ次の1行を入れる。
-
-~~~text
-127.0.0.1 kishino.42.fr
-~~~
-
-反映と確認:
-
-~~~sh
-sudo cloud-init single --name update_etc_hosts --frequency always
-getent hosts kishino.42.fr
-sudo reboot
-~~~
-
-再ログイン後、`getent hosts kishino.42.fr` が `127.0.0.1` を返すことまで確認する。
-
-### 当日の順番
-
-1. Git所有者・提出物・secret非追跡を確認。
-2. 停止条件の静的検査。
-3. `make` で fresh build。
-4. `docker compose ps`、image、PID 1、network、volumeを確認。
-5. HTTP拒否、HTTPS、TLS 1.2/1.3を確認。
-6. WordPressの2ユーザー、コメント、管理画面編集を確認。
-7. MariaDBへ接続し、DBが空でないことを確認。
-8. `make down && make`、続いてVM再起動で永続化を確認。
-9. reviewer指定の設定変更を行い、rebuild・restart・疎通確認。
-
-### 校舎での提出・評価手順
-
-#### 1. 校舎へ行く前
-
-提出remoteの既定branchへ最新commitをpushし、remote上のSHAまで一致させる。
-このGitHubを提出先にする場合は次を実行する。
-
-~~~sh
-git status -sb
-git diff --check
-git push origin HEAD:main
-local_sha=$(git rev-parse HEAD)
-remote_sha=$(git ls-remote origin refs/heads/main | cut -f1)
-printf 'local=%s\nremote=%s\n' "$local_sha" "$remote_sha"
-test "$local_sha" = "$remote_sha"
-~~~
-
-Intraに別の提出repository URLが表示される場合、GitHubへpushしただけでは提出にならない。
-必ずIntra指定remoteにも同じcommitをpushし、同様にSHAを照合する。
-
-Intraでは `Projects` から `Inception` を開き、表示されるGit repository URLを正本として使う。
-push後は評価枠の日時と場所を確認し、必要なcorrection pointsが足りることも確認する。
-pushしただけで評価予約まで完了したとはみなさない。ボタン名や画面構成が変わっている場合は、
-当日のIntra表示を優先する。
-
-#### 2. 校舎でVMを起動した直後
-
-評価専用VMを起動し、時計、空き容量、Docker、名前解決を確認する。
-
-~~~sh
-date -Is
-df -h /
-docker version --format '{{.Server.Version}}'
-docker compose version
-getent hosts kishino.42.fr
-~~~
-
-- VM内browserなら `kishino.42.fr` は `127.0.0.1` へ向ける。
-- host側browserなら、hostの `/etc/hosts` で `kishino.42.fr` をVMのIPv4へ向ける。
-- snapshot復帰後に時計がずれていたら、buildやcloneより先にNTPを直す。
-
-#### 3. 評価対象をfresh cloneする
-
-作業directoryではなく、Intraに登録したremoteを空directoryへcloneする。
-
-~~~sh
-read -r -p '42 submission repository URL: ' SUBMISSION_URL
-eval_root=$(mktemp -d "$HOME/inception-eval.XXXXXX")
-git clone "$SUBMISSION_URL" "$eval_root/inception"
-cd "$eval_root/inception"
-git status -sb
-git log -1 --format='%H%n%cI%n%s'
-git remote -v
-~~~
-
-ここで表示されるSHAが、提出前に照合したSHAと同じであることを確認する。
-
-#### 4. clean buildを実演する
-
-EvalHub指定のDocker全削除は、他プロジェクトがない評価専用VMでだけ実行する。
-bind dataはDocker volume削除では消えないため、既存dataを削除せず退避してから `make` する。
-
-~~~sh
-timestamp=$(date +%Y%m%d-%H%M%S)
-[ ! -d /home/kishino/data ] || \
-  sudo mv /home/kishino/data "/home/kishino/data.pre-eval-$timestamp"
-
-docker stop $(docker ps -qa); docker rm $(docker ps -qa); \
-docker rmi -f $(docker images -qa); docker volume rm $(docker volume ls -q); \
-docker network rm $(docker network ls -q) 2>/dev/null
-
+```sh
 make
-docker compose -f srcs/docker-compose.yml ps
-curl -kfsSI https://kishino.42.fr
-~~~
+dc ps
+```
 
-`make` はlocalの `secrets/` を自動生成する。passwordをGitへ追加しない。
+**期待結果：** 3 service が Up、MariaDB と WordPress は最終的に healthy。`make` は data／secrets の準備と `compose up -d --build` を行う。
 
-#### 5. peer evaluationで見せる順番
+**口頭説明：**「server 自身を foreground で動かし、終了したら container も終了させます。`exec` で shell を server に置き換え、PID 1 が終了シグナルを直接受け取れるようにします。」
 
-1. rootの必須file、Git SHA、secret非追跡、禁止pattern不在。
-2. `make` と3 container、image、network、volume、443-only。
-3. browserでWordPress、comment追加、`kishino` のadmin dashboard編集。
-4. MariaDBのtable、WordPress userとrole。
-5. `make down && make` 後の永続化。
-6. VM reboot後の自動復旧と永続化。
-7. reviewer指定の設定変更、rebuild、旧状態と新状態の疎通比較。
+**周辺知識：** `up -d` はホスト側 CLI を切り離す指定で、entrypoint 内の `server &` とは別。
+WordPress の DB 待ちは最大 30 回の有限 retry。`restart: always` は終了した container を再起動するが、**unhealthy だけで再起動するわけではない**。
 
-#### 校舎での注意点
+## 3. Activity overview — Docker と構成を説明
 
-- 評価開始後は提出branchを更新しない。fresh cloneのSHAを評価者と最初に確認する。
-- secret値をterminal履歴、チャット、Git差分へ貼らない。必要ならlogin時だけ本人が参照する。
-- `make fclean` はbind dataも削除する。永続化確認用の投稿・comment作成後は実行しない。
-- Docker全削除commandを共有Macや他人のDocker環境で実行しない。
-- 自己署名certificateのbrowser警告は想定内。HTTPへ逃がさずHTTPSで続行する。
-- port変更は評価者が結果を確認するまでrollbackしない。
-- Bonusはmandatoryが完全PASSの場合だけ評価される。本提出ではBonusを主張しない。
+**評価項目：** Docker／Compose の仕組み、Compose を使う場合と使わない場合の image の違い、VM に対する Docker の利点、指定ディレクトリ構造の意義を平易に説明する。
 
-## 1. アーキテクチャ
+```text
+ブラウザ ── HTTPS :443 ──> nginx ── FastCGI :9000 ──> wordpress (PHP-FPM)
+                             │                            │
+                             └── static files (read-only) │── SQL :3306 ──> mariadb
+                                      wordpress_data ─────┘                mariadb_data
+```
 
-~~~mermaid
-flowchart LR
-    B["Browser<br/>https://kishino.42.fr:443"]
+| 質問 | 口頭説明 |
+|---|---|
+| Docker とは？ | 「アプリと依存関係を image にまとめ、独立したプロセス環境で動かします。image は実行元の層、container はその image を起動した実体です。」 |
+| Compose とは？ | 「複数 service の build・network・volume・依存関係を YAML に宣言して、一括で再現するツールです。」 |
+| Compose の有無で image は変わる？ | 「形式は同じです。同じ image を `docker run` でも起動できます。変わるのは起動設定を個別コマンドで与えるか YAML に集約するかです。」 |
+| VM との違いは？ | 「VM は guest kernel ごと動かし、container は Linux host の kernel を共有します。container は軽量に分けやすく、VM は別 kernel の境界を持ちます。本課題では VM 内で Docker を動かします。」 |
+| ディレクトリを分ける理由は？ | 「root の Makefile を入口にし、`srcs/` に全体設定、`requirements/<service>/` に Dockerfile・conf・tools を分け、責務と build context を明確にします。」 |
 
-    subgraph H["Linux VM host"]
-        HP["published port 443"]
+**周辺知識：** namespaces はプロセス・network・mount 等の見える範囲を分け、cgroups は CPU／memory 等を管理する。
+この Compose は resource limit を指定していない。「container だから自動的に使用量を制限している」とは説明しない。
+`RUN` は build 時、`COPY` は build context から image へのコピー、`CMD`／`ENTRYPOINT` は起動時。
+`EXPOSE` は想定 port の宣言であり、ホストへ公開する設定は `ports:`。
 
-        subgraph N["Docker bridge network: inception"]
-            NX["nginx<br/>PID 1: nginx<br/>TLS 1.2/1.3"]
-            WP["wordpress<br/>PID 1: php-fpm8.2 -F<br/>port 9000"]
-            DB["mariadb<br/>PID 1: mariadbd<br/>port 3306"]
-            NX -->|"FastCGI wordpress:9000"| WP
-            WP -->|"Docker DNS mariadb:3306"| DB
-        end
+## 4. README check — 必須 README
 
-        WV["named volume: wordpress_data<br/>/home/kishino/data/wordpress"]
-        DV["named volume: mariadb_data<br/>/home/kishino/data/mariadb"]
-        S["Docker secrets<br/>/run/secrets/*"]
+**評価項目：** root の `README.md` が存在し、先頭行が斜体の
+`This project has been created as part of the 42 curriculum by <login...>` 形式であること。
+`Description`、`Instructions`、AI 利用の説明を含む `Resources` が必須。欠落があれば終了。
 
-        HP --> NX
-        WV -->|"rw"| WP
-        WV -->|"ro"| NX
-        DV -->|"rw"| DB
-        S --> WP
-        S --> DB
-    end
+```sh
+head -n 1 README.md
+rg -n '^## |^### Use of AI|Claude|Codex' README.md
+```
 
-    B --> HP
-~~~
+**期待結果／口頭説明：** 先頭行に `kishino`、必要 section と AI の利用説明がある。
+「README は課題の目的、起動方法、設計理由、参照資料、AI の支援範囲の入口です。採用した内容の理解と説明は本人の責任です。」
 
-外部に publish されるのは nginx の443だけ。WordPressとMariaDBには `ports:` がなく、
-`inception` network 上の service name をDocker DNSとして利用する。
+## 5. Documentation check — 利用者用・開発者用文書
 
-## 2. コードの住所録
+**評価項目：** root に空でない `USER_DOC.md` と `DEV_DOC.md` が必要。欠落・空なら終了。
+USER_DOC は開始／停止、サイト／管理画面へのアクセス、認証情報管理、基本確認を扱う。
+DEV_DOC は前提環境、setup、Makefile、Compose コマンド、データ永続化を扱う。
 
-行番号は現在の目安。ずれたら右端の locator を使う。
-
-| 確認対象 | パス・現在行 | locator |
-|---|---|---|
-| Compose 3 services | `srcs/docker-compose.yml:3-65` | `grep -nE '^  (mariadb|wordpress|nginx):' srcs/docker-compose.yml` |
-| image名・restart・network | `srcs/docker-compose.yml:7-10,27-30,56-59` | `grep -nE 'image:|restart:|networks:' srcs/docker-compose.yml` |
-| nginx公開ポート | `srcs/docker-compose.yml:60` | `grep -n 'ports:' srcs/docker-compose.yml` |
-| volume mount | `srcs/docker-compose.yml:15-16,41-42,61-62` | `grep -nE 'mariadb_data|wordpress_data' srcs/docker-compose.yml` |
-| named volume host path | `srcs/docker-compose.yml:72-87` | `grep -nE 'driver_opts|device:' srcs/docker-compose.yml` |
-| Docker secrets | `srcs/docker-compose.yml:89-95` | `grep -nE '^secrets:|file:' srcs/docker-compose.yml` |
-| Make entrypoint | `Makefile:6-10` | `grep -nE '^all:|^up:' Makefile` |
-| 非破壊停止 | `Makefile:12-14` | `grep -nA2 '^down:' Makefile` |
-| 破壊的clean | `Makefile:16-26` | `grep -nE '^clean:|^fclean:|^re:' Makefile` |
-| secret生成・mode 600 | `Makefile:43-64` | `grep -nA22 '^secrets:' Makefile` |
-| MariaDB image | `srcs/requirements/mariadb/Dockerfile` | `nl -ba srcs/requirements/mariadb/Dockerfile` |
-| MariaDB port | `srcs/requirements/mariadb/conf/99-inception.cnf:2-4` | `grep -nE 'bind-address|port|skip-name' srcs/requirements/mariadb/conf/99-inception.cnf` |
-| foreground bootstrap | `srcs/requirements/mariadb/tools/entrypoint.sh:19-31` | `grep -nE 'bootstrap|FLUSH|CREATE|GRANT|ALTER|PROVISION' srcs/requirements/mariadb/tools/entrypoint.sh` |
-| MariaDB PID 1 | `srcs/requirements/mariadb/tools/entrypoint.sh:35` | `grep -n 'exec mariadbd' srcs/requirements/mariadb/tools/entrypoint.sh` |
-| WordPress image | `srcs/requirements/wordpress/Dockerfile` | `nl -ba srcs/requirements/wordpress/Dockerfile` |
-| PHP-FPM port | `srcs/requirements/wordpress/conf/www.conf:4` | `grep -n 'listen' srcs/requirements/wordpress/conf/www.conf` |
-| WordPress初期化 | `srcs/requirements/wordpress/tools/entrypoint.sh:22-49` | `grep -nE 'wp core|wp config|wp user' srcs/requirements/wordpress/tools/entrypoint.sh` |
-| PHP-FPM PID 1 | `srcs/requirements/wordpress/tools/entrypoint.sh:58` | `grep -n 'exec.*php-fpm' srcs/requirements/wordpress/tools/entrypoint.sh` |
-| nginx image・証明書 | `srcs/requirements/nginx/Dockerfile:1-20` | `nl -ba srcs/requirements/nginx/Dockerfile` |
-| nginx TLS・port | `srcs/requirements/nginx/conf/nginx.conf:2-8` | `grep -nE 'listen|server_name|ssl_' srcs/requirements/nginx/conf/nginx.conf` |
-| FastCGI routing | `srcs/requirements/nginx/conf/nginx.conf:21-25` | `grep -nA5 'location.*php' srcs/requirements/nginx/conf/nginx.conf` |
-| 非機密設定 | `srcs/.env` | `cut -d= -f1 srcs/.env` |
-| secret除外 | `.gitignore:1-2` | `nl -ba .gitignore` |
-| 設計説明 | `README.md` | `grep -n '^### ' README.md` |
-| 利用者手順 | `USER_DOC.md` | `grep -n '^## ' USER_DOC.md` |
-| 開発者手順 | `DEV_DOC.md` | `grep -n '^## ' DEV_DOC.md` |
-
-## 3. EvalHub順の完全確認
-
-### A. Preliminaries
-
-#### Gitと提出物
-
-~~~sh
-git rev-parse --show-toplevel
-git remote get-url origin | sed -E 's#(https?://)[^/@]+@#\1[REDACTED]@#'
-git status -sb
-find . -maxdepth 2 -type f -not -path './.git/*' | sort
-~~~
-
-説明:
-
-- 評価対象はcloneされたGitリポジトリの内容だけ。
-- 必須設定はルートの `srcs/` 内、操作入口はルートの `Makefile`。
-- local secretは生成物であり、提出物ではない。
-
-#### secretを値なしで証明
-
-~~~sh
-git ls-files secrets
-git check-ignore -v secrets/db_root_password.txt \
-  secrets/db_password.txt secrets/credentials.txt
-stat -c '%a %n' secrets/*.txt
-docker inspect wordpress --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | sed 's/=.*$/=[REDACTED]/' | grep -Ei 'PASS|PASSWORD|SECRET' || true
-~~~
-
-期待:
-
-- Git追跡なし、`.gitignore` が適用。
-- file modeは600。
-- container environmentにpassword/secret名がない。
-- 実値は画像共有、ログ、レビュー記録へ貼らない。WordPressログイン時だけローカルで確認する。
-
-### B. General instructions / hard-stop scan
-
-~~~sh
-grep -nE 'network_mode|links:|networks:' srcs/docker-compose.yml
-grep -RIn -- '--link' Makefile srcs || true
-grep -RInE 'tail[[:space:]]+-f|sleep[[:space:]]+infinity|while[[:space:]]+true' \
-  Makefile srcs || true
-grep -RInE '[[:space:]]&[[:space:]]*($|#)' \
-  srcs/requirements/*/tools || true
-head -n1 srcs/requirements/*/Dockerfile
-docker compose -f srcs/docker-compose.yml config --quiet
-~~~
-
-答え:
-
-- `network_mode: host`、`links:`、`--link` は不使用。
-- 全serviceが宣言済み `inception` bridge networkへ参加。
-- entrypointは初期化後に `exec` し、本体をforegroundのPID 1にする。
-- MariaDB初期化も `mariadbd --bootstrap --skip-networking` をforegroundで一度実行する。
-- 全Dockerfileは `debian:12`。Debian 13がstableのためDebian 12はpenultimate stable。
-
-### C. Build / Docker basics
-
-専用評価VMで:
-
-~~~sh
-make
-make ps
-docker compose -f srcs/docker-compose.yml ps
-docker images --format '{{.Repository}}:{{.Tag}}' | grep ':kishino$'
-docker inspect mariadb wordpress nginx \
-  --format '{{.Name}} image={{.Config.Image}} restart={{.HostConfig.RestartPolicy.Name}}'
-~~~
-
-期待:
-
-- `mariadb:kishino`、`wordpress:kishino`、`nginx:kishino`。
-- 3 containerがUp、MariaDBはhealthy。
-- 3つとも `restart=always`。
-- hostへ公開されるPORTSはnginxの443だけ。
-
-「ready-made imageでは？」への答え:
-
-> `debian:12` は許可されたOS base imageです。nginx、MariaDB、WordPressの完成済みservice imageは使わず、
-> 各DockerfileでDebian packageやWP-CLIを導入し、自分の設定とentrypointを組み込んでいます。
-
-### D. README / documentation
-
-~~~sh
-head -n1 README.md
-grep -nE '^## (Description|Instructions|Resources)$' README.md
-grep -n 'Use of AI assistance' README.md
+```sh
 test -s USER_DOC.md && test -s DEV_DOC.md
-grep -nE 'Starting and stopping|admin dashboard|Credentials|Checking' USER_DOC.md
-grep -nE 'Prerequisites|Makefile|docker compose|persistence|Storage' DEV_DOC.md
-~~~
+rg -n '^## |^### ' USER_DOC.md DEV_DOC.md
+```
 
-説明:
+**口頭説明：**「利用者には運用の手順を、開発者には構成を再現・変更するための情報を分けています。」
 
-- README 1行目は指定形式でitalic。
-- `Description`、`Instructions`、`Resources`、AI利用説明がある。
-- USER_DOCは利用者／管理者向け、DEV_DOCは構築／運用／永続化向け。
+| 日常操作 | 本実装での効果 |
+|---|---|
+| `make` | 準備・build・起動 |
+| `make down` | container／network を削除。image／volume／実データは保持 |
+| `make clean` | `down` に加えて service image を削除。実データは保持 |
+| `make fclean`／`make re` | **実データも削除**／削除後に起動。永続化の実演には使わない |
+| `dc logs --tail=40 wordpress` | 対象 service の直近ログで起動失敗を調べる |
 
-### E. Simple setup / HTTPS only
+## 6. Simple setup — HTTPS だけで完成済みサイトへ
 
-~~~sh
-curl --connect-timeout 3 -v http://kishino.42.fr
-curl -kfsSI https://kishino.42.fr
-curl -kfsS https://kishino.42.fr | grep -i '<title>'
-docker port nginx
-docker inspect nginx --format '{{.Path}} {{join .Args " "}}'
-~~~
+**評価項目：** NGINX は port 443 だけからアクセスでき、SSL/TLS 証明書を使用する。
+`https://<login>.42.fr` に設定済み WordPress が表示され、インストール画面は出ない。
+`http://<login>.42.fr` はアクセスできない。不成立なら終了。
 
-期待:
+```sh
+getent hosts kishino.42.fr
+dc ps
+curl --noproxy '*' --max-time 5 http://kishino.42.fr/
+curl --noproxy '*' -ksS --fail -D /tmp/inception-headers \
+  https://kishino.42.fr/ -o /tmp/inception-home.html
+head -n 1 /tmp/inception-headers
+wp core is-installed
+```
 
-- HTTP port 80はconnection refused。HTTPS redirectではなく、そもそもlistenしない。
-- HTTPSは200系でWordPressのHTMLを返す。
-- `docker port nginx` は `443/tcp` だけ。
-- 実行commandは `nginx -g daemon off;`。
-- WordPress installation画面は出ない。
+**期待結果：** HTTP は接続失敗、HTTPS は成功し HTML が保存され、`wp core is-installed` は exit 0。
+ブラウザでも `https://kishino.42.fr` を開き、サイト本文が見え、install 画面でないことを確認する。
+**HTTP status だけでは十分でない**。保存 HTML に error／install 画面がないか確認し、画面と突き合わせる。
 
-### F. NGINX + TLS
+**口頭説明：**「入口を nginx の 443 に限定しています。80 は redirect 用にも開けていません。証明書は自己署名なので、ブラウザ警告は想定内です。」
 
-~~~sh
-openssl s_client -connect kishino.42.fr:443 \
-  -servername kishino.42.fr -tls1_2 </dev/null 2>/dev/null \
-  | grep -E 'Protocol|Cipher'
-openssl s_client -connect kishino.42.fr:443 \
-  -servername kishino.42.fr -tls1_3 </dev/null 2>/dev/null \
-  | grep -E 'Protocol|Cipher'
-openssl s_client -connect kishino.42.fr:443 \
-  -servername kishino.42.fr </dev/null 2>/dev/null \
-  | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
-~~~
+**周辺知識：** VM 内ブラウザなら `/etc/hosts` の `127.0.0.1 kishino.42.fr`、ホスト側ブラウザならホスト側で VM の IP に対応させる。
+`curl -k` は証明書検証を省略するが通信の暗号化は続く。名前解決だけ切り分ける場合は `--resolve kishino.42.fr:443:127.0.0.1` を使えるが、通常のブラウザ用名前解決の確認も必要。
 
-旧TLS拒否:
+## 7. Docker Basics — 自作 image・build・プロセス
 
-~~~sh
-openssl s_client -connect kishino.42.fr:443 \
-  -servername kishino.42.fr -tls1 -cipher 'ALL:@SECLEVEL=0' </dev/null 2>&1 \
-  | grep 'alert protocol version'
-openssl s_client -connect kishino.42.fr:443 \
-  -servername kishino.42.fr -tls1_1 -cipher 'ALL:@SECLEVEL=0' </dev/null 2>&1 \
-  | grep 'alert protocol version'
-~~~
+**評価項目：** service ごとに空でない自作 Dockerfile があり、自分で image を build すること。完成済み service image／DockerHub 等への依存は禁止。
+ベースは直前 stable の Alpine／Debian（原文は `FROM alpine:X.X.X`、`FROM debian:XXXXX` または local image を確認）。
+image 名は対応 service 名と一致すること。Makefile が Compose 経由で全 service を build／起動し、クラッシュしないこと。不成立なら終了。
 
-期待:
+```sh
+dc config --services
+dc images
+rg -n '^FROM|^RUN|^COPY|^ENTRYPOINT|^CMD' srcs/requirements/*/Dockerfile
+for svc in nginx wordpress mariadb; do
+  docker inspect "$svc" --format '{{.Name}} image={{.Config.Image}} status={{.State.Status}} restarts={{.RestartCount}}'
+  docker exec "$svc" sh -c 'tr "\000" " " </proc/1/cmdline; echo'
+done
+```
 
-- TLS 1.2/1.3はhandshake成功。
-- TLS 1.0/1.1はhandshake失敗。
-- subject/SANに `kishino.42.fr`。
-- 自己署名警告は許容。暗号化していないこととは異なる。
+**期待結果：** 自作 3 image、対応する running container、PID 1 は nginx master／php-fpm／mariadbd。
+restart 回数が増える場合は正常稼働とせずログで調べる。Debian OS ベースの取得と、完成済み `FROM nginx` 等の使用を区別する。
 
-> OpenSSL 3で `-cipher 'ALL:@SECLEVEL=0'` を付けずに `no protocols available` となった場合、
-> それはclient側が古いprotocolを開始できなかっただけで、server拒否の証明ではない。
-> serverからの `alert protocol version` を確認する。`Cipher is (NONE)` 単独では、cipherや署名方式など
-> protocol version以外の不一致でも出るため証明に使わない。
+**口頭説明：**「3 つとも `debian:12` に必要な package を自分で install します。`image: nginx:kishino` は完成済み image を使う指定ではなく、隣の `build:` から作る image の名前です。」
 
-コード:
+**周辺知識：** `:kishino` は tag、image の repository 名は service と同じ。tag 固定と digest 固定は異なり、`debian:12` の中身は更新され得る。
+1 service＝1 container は 1 PID の意味ではない。nginx／PHP-FPM は master と worker を持てる。
 
-- protocol制限: `srcs/requirements/nginx/conf/nginx.conf` の `ssl_protocols`。
-- certificate生成: `srcs/requirements/nginx/Dockerfile` の `openssl req`。
-- foreground: Dockerfile末尾の `nginx -g 'daemon off;'`。
+## 8. Docker Network — 明示 network と名前解決
 
-### G. Docker network
+**評価項目：** Compose が Docker network を利用し、`docker network ls` で確認できること。仕組みを簡単に説明すること。不成立なら終了。
 
-~~~sh
-docker network ls | grep inception
-docker network inspect inception \
-  --format '{{range .Containers}}{{.Name}} {{end}}'
+```sh
+docker network ls
+docker network inspect inception --format '{{.Driver}} {{range .Containers}}{{.Name}} {{end}}'
 docker exec nginx getent hosts wordpress
 docker exec wordpress getent hosts mariadb
-~~~
-
-期待:
-
-- driverはbridge、3 containerが参加。
-- Docker DNSで `wordpress` と `mariadb` が解決できる。
-
-15秒回答:
-
-> 各containerは独立したnetwork namespaceを持ちます。Composeのuser-defined bridgeへ参加すると、
-> Docker DNSによりservice nameで相互接続できます。hostへpublishするのはnginxの443だけなので、
-> WordPressの9000とMariaDBの3306は外部へ露出しません。
-
-### H. WordPress + PHP-FPM + volume
-
-~~~sh
-docker compose -f srcs/docker-compose.yml ps wordpress
-docker exec wordpress sh -c 'ps -p 1 -o pid=,comm=,args='
-docker exec wordpress wp core is-installed --allow-root --path=/var/www/html
-docker exec wordpress wp core version --allow-root --path=/var/www/html
-docker exec wordpress wp user list \
-  --fields=user_login,roles --allow-root --path=/var/www/html
-docker volume inspect wordpress_data \
-  --format 'name={{.Name}} device={{index .Options "device"}}'
-docker inspect nginx \
-  --format '{{range .Mounts}}{{.Name}} rw={{.RW}} dest={{.Destination}}{{println}}{{end}}'
-~~~
-
-期待:
-
-- PID 1は `php-fpm8.2 -F`。
-- userは `kishino` administrator、`guest` author。
-- 管理者名に `admin` / `Admin` を含まない。
-- volume deviceは `/home/kishino/data/wordpress`。
-- nginx側のWordPress volumeは `rw=false`。
-
-ブラウザ実演:
-
-1. `guest` でログインし、既存記事へコメントを投稿。
-2. `kishino` で `/wp-admin` にログイン。
-3. pageまたはsite taglineを変更して保存。
-4. public siteで変更が表示されることを確認。
-
-> passwordは `secrets/credentials.txt` からローカルで確認するが、画面共有のterminalへ出しっぱなしにしない。
-
-### I. MariaDB + volume
-
-~~~sh
-docker compose -f srcs/docker-compose.yml ps mariadb
-docker exec mariadb sh -c 'ps -p 1 -o pid=,comm=,args='
-docker volume inspect mariadb_data \
-  --format 'name={{.Name}} device={{index .Options "device"}}'
-docker exec wordpress sh -c \
-  'mariadb -h mariadb -u"$MYSQL_USER" \
-  -p"$(cat /run/secrets/db_password)" "$MYSQL_DATABASE" \
-  -Nse "SHOW TABLES"' | wc -l
-docker exec mariadb sh -c \
-  'mariadb -u root -p"$(cat /run/secrets/db_root_password)" \
-  -Nse "SELECT User, Host FROM mysql.user ORDER BY User, Host"'
-~~~
-
-期待:
-
-- PID 1は `mariadbd`。
-- volume deviceは `/home/kishino/data/mariadb`。
-- WordPress DBのtable数は0より大きい。
-- `wpuser` は `wordpress` DBだけにgrantされる。
-
-grant確認:
-
-~~~sh
-docker exec mariadb sh -c \
-  'mariadb -u root -p"$(cat /run/secrets/db_root_password)" \
-  "$MYSQL_DATABASE" -Nse \
-  "SELECT GRANTEE, TABLE_SCHEMA, PRIVILEGE_TYPE
-   FROM information_schema.SCHEMA_PRIVILEGES
-   WHERE TABLE_SCHEMA = DATABASE()
-   ORDER BY GRANTEE, PRIVILEGE_TYPE"'
-~~~
-
-初回起動の説明:
-
-> 空volumeなら `mariadb-install-db` でsystem tableを作ります。markerがなければ
-> `mariadbd --bootstrap --skip-networking` をforegroundで実行し、DB、app user、
-> root認証を設定します。成功後にmarkerを置き、最後に `exec mariadbd` します。
-> 通常serverを一時的にbackground起動していません。
-
-### J. Persistence
-
-評価前にブラウザで固有の変更を作る。例: taglineを `defense-YYYYMMDD-HHMM` にする。
-
-container再作成:
-
-~~~sh
-docker exec wordpress wp option get blogdescription \
-  --allow-root --path=/var/www/html
-make down
-make
-docker exec wordpress wp option get blogdescription \
-  --allow-root --path=/var/www/html
-~~~
-
-期待: 前後が同じ。`make down` はvolume/dataを削除しない。
-
-VM再起動:
-
-~~~sh
-sudo reboot
-~~~
-
-再ログイン後:
-
-~~~sh
-docker ps
-curl -kfsSI https://kishino.42.fr
-docker exec wordpress wp option get blogdescription \
-  --allow-root --path=/var/www/html
-~~~
-
-期待: 3 containerが `restart: always` で復帰し、サイトと固有変更が残る。
-
-> [!WARNING]
-> `make fclean` はvolumeと `/home/kishino/data/{wordpress,mariadb}` を削除する。
-> persistence確認中は使わない。
-
-### K. daemon exit recovery（質問された場合）
-
-`docker stop` / `docker kill` はDockerが明示停止として扱うため、restart policyの試験にならないことがある。
-Linux VMのhost PIDを終了させてdaemon crashを再現する。
-
-~~~sh
-before=$(docker inspect wordpress --format '{{.RestartCount}}')
-host_pid=$(docker inspect wordpress --format '{{.State.Pid}}')
-sudo kill -KILL "$host_pid"
-sleep 5
-docker inspect wordpress \
-  --format 'running={{.State.Running}} restart_count={{.RestartCount}}'
-printf 'before=%s\n' "$before"
-~~~
-
-期待: `running=true` かつ restart countが増える。
-
-## 4. ライブコーディング完全手順
-
-### 最も安全な選択: nginx 443 → 8443
-
-reviewerがportを自由指定するため、以下の `8443` は指定値へ読み替える。
-
-変更箇所:
-
-| ファイル | 変更 |
-|---|---|
-| `srcs/docker-compose.yml` | `ports: ["443:443"]` → `ports: ["8443:8443"]` |
-| `srcs/requirements/nginx/conf/nginx.conf` | IPv4/IPv6の `listen 443 ssl` → `listen 8443 ssl` |
-| `srcs/requirements/nginx/Dockerfile` | `EXPOSE 443` → `EXPOSE 8443` |
-
-#### 1. 事前確認
-
-~~~sh
-ss -lnt | grep ':8443 ' || true
-git status -sb
-git diff -- srcs/docker-compose.yml \
-  srcs/requirements/nginx/conf/nginx.conf \
-  srcs/requirements/nginx/Dockerfile
-~~~
-
-出力がなければportは空いている。既存差分がある場合は、上書き前にreviewerと確認する。
-
-#### 2. 編集
-
-~~~sh
-nano srcs/docker-compose.yml
-nano srcs/requirements/nginx/conf/nginx.conf
-nano srcs/requirements/nginx/Dockerfile
-~~~
-
-編集後:
-
-~~~sh
-grep -nE 'ports:|listen |EXPOSE' \
-  srcs/docker-compose.yml \
-  srcs/requirements/nginx/conf/nginx.conf \
-  srcs/requirements/nginx/Dockerfile
-docker compose -f srcs/docker-compose.yml config --quiet
-git diff --check
-git diff -- srcs/docker-compose.yml \
-  srcs/requirements/nginx/conf/nginx.conf \
-  srcs/requirements/nginx/Dockerfile
-~~~
-
-#### 3. rebuild・restart
-
-~~~sh
-docker compose -f srcs/docker-compose.yml up -d --build nginx
-docker compose -f srcs/docker-compose.yml ps
-docker logs --tail 50 nginx
-~~~
-
-#### 4. 新portを証明
-
-~~~sh
-for i in $(seq 1 30); do
-  curl -kfsSI https://kishino.42.fr:8443 >/dev/null 2>&1 && break
-  sleep 1
-done
-curl -kfsSI https://kishino.42.fr:8443
-openssl s_client -connect kishino.42.fr:8443 \
-  -servername kishino.42.fr -tls1_2 </dev/null 2>/dev/null \
-  | grep -E 'Protocol|Cipher'
 docker port nginx
-curl --connect-timeout 3 -kfsSI https://kishino.42.fr:443
-~~~
+docker port wordpress
+docker port mariadb
+```
 
-期待:
+**期待結果：** `inception` は bridge で 3 container が所属。service 名が IP に解決される。公開 port は nginx の 443 のみ。
 
-- 8443でWordPressが200系。
-- TLS 1.2以上。
-- `docker port nginx` は8443。
-- 旧443は接続失敗。
+**口頭説明：**「ユーザー定義 bridge 内では Docker の DNS で service 名を解決できます。IP を固定せず `wordpress:9000` と `mariadb:3306` へ接続します。host network はこの network namespace を分ける方式と異なり、課題では禁止です。」
 
-#### 5. rollback（reviewer確認後だけ）
+**周辺知識：** container 内の `localhost` はその container 自身。NGINX から `localhost:9000` では PHP-FPM に届かない。
+内部 port はホストへ publish しなくても同じ network から接続できる。`ports:` がないことは外部公開しない設定であり、Docker host 管理者からのアクセスまで遮断する保証ではない。
+本 network は `internal: true` ではなく、WordPress 初期 download 等の外向き通信も行う。
 
-~~~sh
-git diff -- srcs/docker-compose.yml \
-  srcs/requirements/nginx/conf/nginx.conf \
-  srcs/requirements/nginx/Dockerfile
-git restore -- srcs/docker-compose.yml \
-  srcs/requirements/nginx/conf/nginx.conf \
-  srcs/requirements/nginx/Dockerfile
-docker compose -f srcs/docker-compose.yml up -d --build nginx
-curl -kfsSI https://kishino.42.fr
-~~~
+## 9. NGINX with SSL/TLS — TLS の設定と実通信
 
-`git restore` は上記3ファイルの未コミット変更を破棄する。reviewerが変更を残すよう求めた場合は実行しない。
+**評価項目：** Dockerfile と起動済み container を確認し、HTTP:80 が接続不可、HTTPS で完成済み WordPress が表示されること。
+TLS 1.2 または 1.3 の使用を実証する（原文は「TLS v1.2/v1.3 certificate」と表現）。自己署名は許可される。説明・動作が不成立なら終了。
 
-### reviewerが別serviceを指定した場合
+```sh
+dc ps nginx
+docker exec nginx nginx -t
+docker exec nginx nginx -T 2>&1 | grep -E 'listen|ssl_protocols|fastcgi_pass'
+openssl s_client -connect kishino.42.fr:443 -servername kishino.42.fr -tls1_2 -brief </dev/null
+openssl s_client -connect kishino.42.fr:443 -servername kishino.42.fr -tls1_3 -brief </dev/null
+openssl s_client -connect kishino.42.fr:443 -servername kishino.42.fr -tls1 -cipher 'ALL:@SECLEVEL=0' -brief </dev/null
+openssl s_client -connect kishino.42.fr:443 -servername kishino.42.fr -tls1_1 -cipher 'ALL:@SECLEVEL=0' -brief </dev/null
+```
 
-| 変更 | 必須編集箇所 | 再build |
-|---|---|---|
-| PHP-FPM 9000 → 9001 | `wordpress/conf/www.conf` の `listen`、`wordpress/Dockerfile` の `EXPOSE`、`nginx/conf/nginx.conf` の `fastcgi_pass` | wordpress, nginx |
-| MariaDB 3306 → 3307 | `mariadb/conf/99-inception.cnf` の `port`、`mariadb/Dockerfile` の `EXPOSE`、WordPress entrypointの接続待ちと `--dbhost` | mariadb, wordpress |
+**期待結果：** 構文 OK、`ssl_protocols TLSv1.2 TLSv1.3`、1.2／1.3 の handshake 成功と negotiated protocol／cipher 表示。
+1.0／1.1 は成立しない。ただし client の `no protocols available`／`no ciphers available` は **client 側の拒否で、server の拒否証明ではない**。
+上の `-cipher` はこの検証 client だけの制限を緩める指定。server 由来の `alert protocol version` を確認する。
+それでも旧 protocol を送信できなければ対応 client が必要で、拒否の実通信は未確認とし、設定の証拠と分けて説明する。
+HTTP／HTTPS のページ確認は §6 の GET とブラウザ実演を用いる。
 
-PHP-FPM例:
+**口頭説明：**「TLS version は証明書自体の種類ではなく、handshake で合意する通信 protocol です。証明書は公開鍵とサーバー名等を結びつけ、自己署名では第三者 CA による身元保証がありません。」
 
-~~~sh
-docker compose -f srcs/docker-compose.yml up -d --build wordpress nginx
-curl -kfsSI https://kishino.42.fr
-~~~
+**周辺知識：** TLS は盗聴対策の暗号化・改ざん検出・相手認証を担う。公開鍵／証明書と秘密鍵は別物。
+NGINX は静的ファイルを直接返し、PHP は `fastcgi_pass wordpress:9000` へ渡す。`SCRIPT_FILENAME` が実行ファイルの path を PHP-FPM に伝える。
+本実装は build 時に自己署名証明書と秘密鍵を生成する。image に秘密鍵が含まれるため、image を公開配布する設計ではない。
 
-MariaDB変更時の追加注意:
+## 10. WordPress with php-fpm and its volume — CMS・権限・共有ファイル
 
-- persisted `wp-config.php` の `DB_HOST` は初回作成後に自動再生成されない。
-- stack停止前に、指定portへ合わせて更新する。
+**評価項目：** 専用 Dockerfile があり NGINX を含まないこと。container が起動し、`docker volume ls`／`inspect` で `/home/<login>/data/` 配下を確認できること。
+用意された WordPress user でコメントを追加できること。管理者で dashboard に入り、管理者名に `admin`／`Admin` を含まないこと。
+dashboard から page を編集し、サイト側に反映されること。不成立なら終了。
 
-~~~sh
-docker exec wordpress wp config set DB_HOST 'mariadb:3307' \
-  --allow-root --path=/var/www/html
-docker compose -f srcs/docker-compose.yml up -d --build mariadb wordpress nginx
-~~~
+```sh
+cat srcs/requirements/wordpress/Dockerfile
+dc ps wordpress
+docker volume ls
+docker volume inspect wordpress_data --format '{{json .Options}}'
+docker inspect nginx wordpress --format '{{.Name}} {{range .Mounts}}{{.Name}} -> {{.Destination}} RW={{.RW}} {{end}}'
+wp user list --fields=user_login,roles
+```
 
-## 5. 頻出質問と短答
+**期待結果：** `device=/home/kishino/data/wordpress`、両 container に `/var/www/html`、nginx 側 `RW=false`。
+ユーザーは `kishino`＝administrator、`guest`＝author。資格情報は `secrets/credentials.txt` にあるが共有画面へ値を出さず入力する。
 
-### DockerとDocker Composeはどう動く？
+**ブラウザ実演：** `guest` でログイン → コメント可能な投稿に識別しやすいコメントを追加 → 必要なら管理者で承認 → 公開表示を確認。
+次に `kishino` で `/wp-admin/` → 固定ページを編集・更新 → 公開ページを再読込して変更を確認する。
+コメント欄がない場合は対象投稿のコメント許可を確認する。再起動テストで再確認するため、URL と変更内容を控える。
 
-> Dockerfileからimmutableなimageをbuildし、imageから隔離されたcontainerを起動します。
-> Composeは複数containerのbuild context、network、volume、secret、依存関係、
-> restart policyを一つの宣言ファイルで再現可能にまとめます。
+**口頭説明：**「WordPress は PHP の CMS、PHP-FPM は PHP 実行プロセスを管理する FastCGI server です。NGINX とは別 container にして、PHP の実行と HTTP/TLS の処理を分担します。」
 
-### Composeあり／なしでimageは違う？
+**周辺知識：** WordPress ファイル・uploads・`wp-config.php` は `wordpress_data`、投稿・コメント・ユーザー・設定値は DB 側に保存される。
+FastCGI は HTTP ではないため `curl http://wordpress:9000` は正しい動作検証ではない。
+本実装の FPM healthcheck は port LISTEN を調べるだけで、PHP 実行や DB 利用の成功まで保証しない。
+起動 script は DB 接続を待ち、未取得なら core を download、未作成なら config、未 install ならサイト、未登録なら第 2 user を作り、最後に `exec php-fpm8.2 -F` する。
 
-> image形式は同じです。Composeなしなら `docker build`、`docker run`、`docker network`、
-> `docker volume` などを個別に指定します。Composeは同じ操作と関係を宣言的に一括管理します。
+## 11. MariaDB and its volume — DB 接続・中身・権限
 
-### imageとcontainerの違いは？
+**評価項目：** 専用 Dockerfile があり NGINX を含まないこと。container が起動し、volume の実 path が `/home/<login>/data/` 配下であること。
+DB へのログイン方法を説明し、DB が空でないことを確認する。不成立なら終了。
 
-> imageはread-only layerのtemplate、containerはそのimageにwritable layer、process、
-> network namespaceなどを加えた実行instanceです。重要データをcontainer layerへ置かずvolumeへ保存します。
+```sh
+cat srcs/requirements/mariadb/Dockerfile
+dc ps mariadb
+docker volume inspect mariadb_data --format '{{json .Options}}'
+docker exec -it mariadb mariadb -u root -p
+```
 
-### DockerがVMより有利な点は？
+password は prompt に手入力する（コマンド行・履歴に書かない）。接続後は以下を実行する。
 
-> containerはhost kernelを共有するため軽量・高速・再現しやすいです。VMはguest kernelを含み、
-> isolationは強い一方でresourceと起動時間のcostが大きいです。この課題ではVMの中でDockerを動かします。
+```sql
+SHOW DATABASES;
+USE wordpress;
+SHOW TABLES;
+SELECT ID, post_title, post_status FROM wp_posts LIMIT 5;
+SELECT user_login FROM wp_users;
+EXIT;
+```
 
-### なぜ1 container 1 service？
+**期待結果：** `device=/home/kishino/data/mariadb`、WordPress の DB・table・投稿／ユーザーの行が存在する。`user_pass` 等の認証値は表示しない。
+アプリと同じ TCP 経路・認証を示す場合は次を使い、DB 用 password を手入力する。
 
-> lifecycle、log、failure、resource、更新単位を分離できます。nginx、PHP-FPM、MariaDBを独立させ、
-> Compose networkで接続することで、責任範囲と障害箇所が明確になります。
+```sh
+docker exec -it wordpress mariadb -h mariadb -P 3306 -u wpuser -p wordpress
+```
 
-### なぜPID 1とforegroundが重要？
+**口頭説明：**「WordPress は専用 DB user で `mariadb:3306` に接続します。管理用 root と分け、`wpuser` の権限は WordPress 用 DB に限定しています。」
 
-> containerの停止signalはPID 1へ届きます。shellがserverをchild/backgroundにするとsignal伝達や終了code、
-> zombie回収が不明瞭になります。entrypoint末尾で `exec` し、本体をforegroundのPID 1にします。
+**周辺知識：** この root は `unix_socket OR mysql_native_password` 認証。
+container 内の OS root なら `docker exec -it mariadb mariadb -u root` でも Unix socket 経由で接続できる。
+これは password が未設定という意味ではなく、socket の OS identity を信頼する別経路。`root -p` の成功だけでは password 認証の証明にならず、アプリ user の TCP 接続で確認する。
+`mariadb-admin ping` の healthy は server の生存確認で、WordPress user の認証・table の存在の証明ではない。
 
-### MariaDB初期化でbackground serverを使わない方法は？
+**初回起動を聞かれたら：**「空 data に `mariadb-install-db` で system table を作ります。marker がなければ `mariadbd --bootstrap --skip-networking` に SQL を渡し、DB・user・権限・root 認証を設定します。成功時だけ marker を作り、最後に `exec mariadbd --user=mysql` で通常 server に切り替えます。bootstrap は foreground で処理して終了し、一時 server を background にしていません。」
 
-> `mariadbd --bootstrap --skip-networking` はSQLをstdinからforegroundで処理して終了します。
-> 最初に `FLUSH PRIVILEGES` し、DB/user/grant/root認証を設定した後、通常の `mariadbd` を `exec` します。
+## 12. Persistence! — VM 再起動をまたいで保持
 
-### `depends_on` だけでreadyを保証できる？
+**評価項目：** **VM を再起動**し、Compose を再実行して全 service が機能し、WordPress／MariaDB の設定と先ほどのサイト変更が残ることを確認する。不成立なら終了。
 
-> 起動順だけではreadyを保証しません。MariaDBにはhealthcheckを定義し、WordPressは
-> `condition: service_healthy` に依存します。WordPress entrypoint自身も有限回の実接続retryを行います。
-> WordPressにもPHP-FPMのport 9000 listenを確認するhealthcheckがあり、nginxはその
-> `service_healthy` を待つため、`make` 完了直後の502を防ぎます。
+```sh
+# §10 の変更とコメントが公開画面にあることを確認してから実行。
+sudo reboot
+```
 
-### Docker networkとhost networkの違いは？
+再ログイン後、同じリポジトリへ移動し §0 の `dc`／`wp` を再定義する。
 
-> user-defined bridgeではcontainerごとにnetwork namespaceを保ち、Docker DNSと明示的なport publishを使えます。
-> host networkはhostのnetwork namespaceを共有し、port隔離とCompose service discoveryの利点を失います。
+```sh
+make
+dc ps
+getent hosts kishino.42.fr
+wp core is-installed
+wp user list --fields=user_login,roles
+```
 
-### named volumeなのにhost pathが見えるのはなぜ？
+**期待結果：** 初期 install 画面ではなく既存サイトが開き、§10 の編集・コメントが残る。管理画面と §11 の DB 接続も再確認する。
+`make down` → `make` は container 再作成の補助検証にはなるが、VM 再起動の代わりにはならない。
 
-> `driver: local` と `driver_opts` の `type: none`、`o: bind`、`device` を組み合わせています。
-> Dockerにはnamed volumeとして管理させつつ、subject指定の `/home/kishino/data` を実体にしています。
+**口頭説明：**「container の書き込み層の外にデータを置きます。named volume を local driver の bind option で `/home/kishino/data/` に対応させ、container を作り直しても同じデータを mount します。」
 
-### volumeとbind mountの違いは？
+**周辺知識：** `docker volume inspect` の `Options.device` が指定 host path。`Mountpoint` は Docker 管理 path を示す場合がある。
+MariaDB は data／初期化 marker、WordPress は既存 config／install 状態を確認し、再起動時の上書き・二重作成を避ける（冪等性）。
+起動順は MariaDB → WordPress → NGINX。`depends_on` だけでは ready を待たないため、本実装は `condition: service_healthy` と WordPress 内の実接続 retry を使う。
+cloud-init が hosts を再生成する VM では名前解決設定も永続化が必要。データが消えたのか、名前解決だけ失敗したのかを分ける。
 
-> plain bind mountは任意のhost pathを直接mountします。named volumeはDockerが名前とlifecycleを管理します。
-> 本構成はnamed volumeにlocal driverのbind optionを付け、両要件を満たします。
+## 13. Configuration modification — 指定された設定を変更
 
-### secretとenvironmentの違いは？
+**評価項目：** 評価者が service と変更内容（例：空いている新 port）を選ぶ。被評価者が変更し、**project を rebuild・restart**して、新設定でもアクセス・機能が維持されることを実証する。できなければ終了。
 
-> environmentは `docker inspect` やprocess environmentから見えやすいです。
-> secretはread-only fileとして `/run/secrets` にmountされ、image layerやenvironmentへ入れません。
-> domain、DB名、usernameは非機密なのでenvironment、passwordだけsecretです。
+**口頭説明：**「待受側・接続側・公開 port・healthcheck・永続設定を順に追います。Dockerfile を rebuild しても volume 内の既存設定が自動で書き換わるわけではありません。」
 
-### なぜnginxだけvolumeがread-only？
+### A. NGINX の例：443 → 8443
 
-> nginxはstatic assetを読むだけで、WordPress fileを書き換える責任がありません。
-> `:ro` で最小権限にし、書込みはWordPress containerだけへ限定します。
+```sh
+ss -ltn | grep ':8443 '  # 出力があれば別の空き port を選ぶ
+```
 
-### なぜTLS 1.2/1.3だけ？
+1. `srcs/requirements/nginx/conf/nginx.conf` の IPv4／IPv6 両方の `listen 443` を `8443` に変更。
+2. `srcs/docker-compose.yml` の nginx `ports` を `"8443:8443"` に変更。
+3. nginx Dockerfile の `EXPOSE` を `8443` に揃える（これは公開操作そのものではない）。
+4. `srcs/.env` の `DOMAIN_NAME` を `kishino.42.fr:8443` にする。これは本実装の WordPress URL 初期化用。NGINX の `server_name`／証明書の DNS 名には port を付けない。
+5. 既存 WordPress の canonical URL も更新する。
 
-> subject要件であり、TLS 1.0/1.1は古いprotocolです。nginxの `ssl_protocols TLSv1.2 TLSv1.3` で制限します。
-> 自己署名かどうかはtrustの問題で、通信暗号化の有無とは別です。
+```sh
+wp option update home 'https://kishino.42.fr:8443'
+wp option update siteurl 'https://kishino.42.fr:8443'
+make
+dc ps
+docker exec nginx nginx -t
+curl --noproxy '*' -ksS --fail -L --max-redirs 5 \
+  https://kishino.42.fr:8443/ -o /tmp/inception-8443.html
+curl --noproxy '*' -k --max-time 5 https://kishino.42.fr/
+wp option get home
+wp option get siteurl
+```
 
-### なぜDebian 12？
+**期待結果：** 8443 の GET 成功、旧 443 は接続失敗、両 option は新 URL。
+ブラウザでも `:8443` の本文・リンク・管理画面ログインを確認する。固定で埋め込まれた旧 URL が残る場合は対象リンクも修正する。
+公開側だけ `8443:443` にする方法もあるが、container 内の待受変更を指定された場合はそれだけでは不足。
 
-> Debian 13がcurrent stableで、Debian 12がoldstable＝penultimate stableです。
-> tagを固定することで `latest` の漂流も避けます。
+### B. PHP-FPM の例：9000 → 9001
 
-### WordPress再起動で再インストールされない？
-
-> volume上の `wp-load.php`、`wp-config.php`、`wp core is-installed`、user存在を検査します。
-> MariaDB側もdata directoryとprovision markerを検査するため、初期化処理はidempotentです。
-
-### `EXPOSE` と `ports` の違いは？
-
-> `EXPOSE` はimageが想定するlisten portのmetadataで、host公開はしません。
-> Compose `ports` がhostとcontainerのport mappingを作ります。本構成で `ports` があるのはnginxだけです。
-
-### certificateはどこで作る？
-
-> nginx image build時にDockerfileの `openssl req -x509` で作り、
-> `/etc/nginx/ssl/inception.crt` と `inception.key` をnginx configから参照します。
-
-### directory構成の意味は？
-
-> ルートは操作契約のMakefileと必須documentation、`srcs/docker-compose.yml` は全体orchestration、
-> `requirements/<service>` はservice固有のDockerfile、config、entrypointに分離しています。
-> reviewerは全体から各service実装へ辿れます。
-
-## 6. トラブルシュート
-
-~~~mermaid
-flowchart TD
-    A["make / access failure"] --> B{"docker compose ps"}
-    B -->|"container absent/exited"| C["docker compose logs --tail 100 SERVICE"]
-    B -->|"all Up"| D{"HTTPS response?"}
-    C --> E{"Which service?"}
-    E -->|"mariadb"| F["secret mount / datadir / bootstrap SQL / healthcheck"]
-    E -->|"wordpress"| G["DB credentials / DNS / wp-config / PHP-FPM"]
-    E -->|"nginx"| H["listen port / certificate / fastcgi_pass / shared volume"]
-    D -->|"connection refused"| I["published port / nginx listen / /etc/hosts"]
-    D -->|"502"| G
-    D -->|"DB error"| F
-    D -->|"wrong content"| J["wordpress_data mount / WordPress install state"]
-~~~
-
-最短診断:
-
-~~~sh
-docker compose -f srcs/docker-compose.yml ps
-docker compose -f srcs/docker-compose.yml logs --tail 100
-docker inspect mariadb --format '{{json .State.Health}}'
-docker network inspect inception
-docker volume inspect mariadb_data wordpress_data
-curl -kvI https://kishino.42.fr
-~~~
-
-| 症状 | 最初に見る場所 |
+| 変更ファイル | 対応 |
 |---|---|
-| MariaDB unhealthy | `docker logs mariadb`、secret mount、`/home/kishino/data/mariadb` ownership |
-| WordPress restart loop | `docker logs wordpress`、DB DNS/credential、有限retry |
-| 502 Bad Gateway | PHP-FPMのlisten、nginx `fastcgi_pass`、WordPress container状態 |
-| HTTPS connection refused | Compose `ports`、nginx `listen`、container状態 |
-| certificate warning | 自己署名なら正常。CN/SANと期限だけ確認 |
-| loginできない | persisted accountとsecret fileの不一致を疑う。値を作り直すだけでは直らない |
-| 変更が消えた | named volume mountとhost device、`make fclean` 実行有無 |
-| port変更後だけ失敗 | 全参照箇所、persisted config、rebuild対象を再確認 |
+| `wordpress/conf/www.conf` | `listen = 9001` |
+| `nginx/conf/nginx.conf` | `fastcgi_pass wordpress:9001;` |
+| `wordpress/Dockerfile` | `EXPOSE 9001` |
+| `srcs/docker-compose.yml` | WordPress healthcheck の `:2328` を `:2329` に変更（9001 の 16 進数） |
 
-## 7. 最終チェックリスト
+上の省略 path は `srcs/requirements/` からの相対 path。`/proc/net/tcp*` の port は 16 進数、`0A` は LISTEN。
 
-### 提出前
+```sh
+make
+dc ps
+docker exec wordpress sh -c "grep ':2329 .* 0A ' /proc/net/tcp /proc/net/tcp6"
+curl --noproxy '*' -ksS --fail https://kishino.42.fr/ -o /tmp/inception-fpm.html
+```
 
-- [ ] `git status -sb` を説明できる。
-- [ ] 42へ実際に提出したremoteを空directoryへcloneし、提出SHAを確認した。
-- [ ] secret実値がGit履歴・tracked fileにない。
-- [ ] root必須5点: `Makefile`、`srcs/`、`README.md`、`USER_DOC.md`、`DEV_DOC.md`。
-- [ ] 禁止pattern検査が空。
-- [ ] 3 Dockerfileが `FROM debian:12`。
-- [ ] image名とservice名が一致。
-- [ ] entrypointにbackground program、無限loopがない。
-- [ ] `docker compose config --quiet` が通る。
-- [ ] fresh `make` が通る。
-- [ ] 3 containerがUp、MariaDBとWordPressがhealthy。
-- [ ] nginxだけ443をpublish。
-- [ ] TLS 1.2/1.3成功、1.0/1.1失敗。
-- [ ] WordPress install画面が出ない。
-- [ ] `kishino` admin、`guest` author。
-- [ ] comment追加とadmin編集を実演済み。
-- [ ] DB接続とtable非空を実演済み。
-- [ ] named volumeのdeviceが `/home/kishino/data/...`。
-- [ ] `make down && make` で変更保持。
-- [ ] VM reboot後も復帰・保持。
-- [ ] VMの時計が正しく、GitHubへのTLS検証が成功する。
-- [ ] cloud-init利用VMでは `kishino.42.fr` がreboot後も名前解決できる。
-- [ ] reviewer指定port変更をrebuild・restart・疎通まで練習済み。
-- [ ] browserでcomment追加とadmin dashboard編集を本人の操作で再確認した。
-- [ ] Bonusは実装していないため主張しない。
+**期待結果：** WordPress healthy、PHP ページ本文と管理画面が機能する。FPM は内部 port なので host の `ports:` は追加しない。
+A を同時に適用したままなら確認 URL に `:8443` を付ける。
 
-### 口頭防御
+### C. MariaDB の例：3306 → 3307
 
-- [ ] Docker / Compose / image / containerを自分の言葉で説明できる。
-- [ ] Docker vs VMを説明できる。
-- [ ] bridge network / Docker DNS / host network不使用を説明できる。
-- [ ] named volume + local bind driverを説明できる。
-- [ ] secrets vs environmentを説明できる。
-- [ ] PID 1 / `exec` / foregroundを説明できる。
-- [ ] TLS、PHP-FPM、FastCGI、MariaDBのrequest flowを図で説明できる。
-- [ ] 初回provisioningとidempotencyを説明できる。
-- [ ] failure時に `ps → logs → network/volume/config` の順で切り分けられる。
+| 変更箇所 | 対応 |
+|---|---|
+| `mariadb/conf/99-inception.cnf`／Dockerfile | `port=3307`／`EXPOSE 3307` |
+| `wordpress/tools/entrypoint.sh` の接続待ち | `mariadb -h mariadb` に `-P 3307` を追加 |
+| 同 script の `wp config create` | `--dbhost=mariadb:3307` |
+| 既存 volume 内の `wp-config.php` | 下記 WP-CLI で `DB_HOST` を更新 |
 
-## 8. この資料自体の更新確認
+```sh
+wp config set DB_HOST 'mariadb:3307'
+make
+dc ps
+wp config get DB_HOST
+docker exec -it wordpress mariadb -h mariadb -P 3307 -u wpuser -p wordpress
+```
 
-コード変更後は、古い行番号やportを残さない。
+**期待結果：** アプリ user で TCP 接続でき、SQL と Web ページ／管理画面が機能する。
+本 DB healthcheck は socket 接続なので port 指定変更は不要だが、TCP 3307 成功の証明にもならない。
 
-~~~sh
-grep -nE '443|9000|3306|bootstrap|DEFENSE' DEFENSE_CHEATSHEET.md
-grep -nE 'ports:|listen |fastcgi_pass|port=|EXPOSE|bootstrap' \
-  srcs/docker-compose.yml \
-  srcs/requirements/*/Dockerfile \
-  srcs/requirements/*/conf/* \
-  srcs/requirements/*/tools/*.sh
-git diff --check
-~~~
+**復元：** 実演で変えた設定と永続値を元に戻して `make`、§6 の GET／ブラウザ確認を行う。
+A は `home`／`siteurl` も元 URL、C は `DB_HOST` も `mariadb:3306` に戻す。`git diff` だけでは volume 内の復元漏れは検出できない。
+`make re` でデータを消して設定変更を成立させる方法は、既存サイト維持の実演として使わない。
 
-最終原則:
+## 14. Bonus — 本実装では未実装
 
-> 「動いた」ではなく、どの要件を、どのコードが担い、どのコマンドと画面で証明したかを答える。
-> 不明なときは推測せず、Compose → service config → runtime state → logsの順に根拠を示す。
+**評価項目：** mandatory が全項目完全に機能する場合だけ採点。追加 service ごとに自作 Dockerfile・専用 container、必要なら専用 volume を用意する。
+以下の許可された追加機能を実際に確認し、各 1 点・最大 5 点。自由選択は仕組みと有用性も説明する。
+
+| 評価項目の日本語訳 | 実装した場合の確認方法 | 口頭説明・周辺知識 |
+|---|---|---|
+| WordPress の cache 管理に Redis を導入 | Redis の応答に加え、WordPress の object cache 接続と利用を確認 | 「繰り返す DB 問い合わせ結果等を memory に cache し、DB の負荷を減らします。」起動しているだけでは連携の証明にならない。 |
+| WordPress volume を参照する FTP server container を用意 | FTP client でログイン・upload し、同じファイルを WordPress volume で確認 | 「共有 volume にファイルを転送します。」FTP と SFTP は別 protocol。認証・権限と data connection も理解する。 |
+| PHP 以外で簡単な static website を作成 | サイト表示、配信ファイル、独自 Dockerfile／container を確認 | 「自己紹介等の完成済みファイルを配信し、リクエストごとの PHP 実行を必要としません。」 |
+| Adminer を導入 | browser から DB へログインし WordPress の table を確認 | 「browser で DB を操作する管理用 client です。MariaDB 自体や WordPress dashboard とは別です。」 |
+| 有用だと思う service を自由に追加 | その service の実機能を操作し、既存構成への効果を示す | 「何を解決するか、どう動くか、なぜこの構成に必要か」を説明する。起動だけで完了にしない。 |
+
+## 参照先
+
+- 評価条件：[42 EvalHub — Inception](https://www.42evalhub.com/common/inception)、リポジトリの `inception.pdf`。
+- 実装根拠：`Makefile`、`srcs/docker-compose.yml`、`srcs/requirements/`、`README.md`、`USER_DOC.md`、`DEV_DOC.md`。
+- 補足：[Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/)、[Debian releases](https://www.debian.org/releases/)。
