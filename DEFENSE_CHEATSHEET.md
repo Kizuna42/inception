@@ -3,6 +3,214 @@
 [42 EvalHub — Inception](https://www.42evalhub.com/common/inception) の評価順に、判定条件を落とさず日本語で整理した学習・実演用の一枚。
 **「評価項目」は原文の要旨訳、「本実装／口頭説明」はこのリポジトリへの対応と補足**。実演結果は当日確認する。
 
+## 評価前の VM セットアップ — 校舎 Ubuntu ＋ VirtualBox
+
+**校舎の Ubuntu（host）で Oracle VM VirtualBox Manager を開き、その中の Ubuntu Desktop（guest）で Docker と Firefox を使う。**
+以降は「校舎 host」と明記した操作以外、**VM 内**で実行する。`sudo` も VM 内用で、校舎 host の設定変更は不要。
+VM 準備 → リポジトリ取得 → §0 の関数定義 → §1〜14 の実演、の順で進める。
+以下の容量・OS は本構成の推奨で、42 の採点上の指定値ではない。
+
+### VM-1. VirtualBox で新しい VM を作る
+
+操作の参照：[Oracle 公式 VM 作成手順](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/create-vm.html)。
+
+**校舎 host：** `uname -m` が `x86_64` であることと、VirtualBox Manager が起動することを確認する。
+VM 保存先は校舎で許可された、自分が書き込めて評価日まで保持される場所を選ぶ。home の quota と filesystem の空きを区別し、`/tmp` を保存先にしない。
+`df -h "$HOME"`、別の保存先ならその path の `df -h` も確認する。quota が設定されていれば校舎の案内に従って確認する。
+**可変サイズの VDI でも、使用に伴って host 側のディスクを消費する。** 空きが足りない状態で ISO や VM を作り始めない。
+
+[Ubuntu 公式配布](https://releases.ubuntu.com/24.04/) から **Ubuntu Desktop 24.04 LTS amd64 ISO** と同じ版の `SHA256SUMS` を取得する。
+校舎 host で `sha256sum <取得したISOのpath>` を実行し、公式 checksum の該当ファイルと一致させる（`<...>` は実 path に置換）。
+
+| VirtualBox Manager の操作 | 設定・理由 |
+|---|---|
+| New／新規 | 名前 `Inception`、保存先は上で確認した場所、ISO に Ubuntu Desktop amd64 を選択 |
+| OS／インストール方式 | Linux／Ubuntu (64-bit)。**Skip Unattended Installation** を選び、本人が installer で設定する（版により表記差あり） |
+| Hardware | 2〜4 vCPU、RAM 4〜6 GiB。Desktop＋browser 用には 6 GiB が目安。host の余力を残す |
+| Hard Disk | VDI、可変サイズ、**50 GiB 以上**。VDI と snapshot が増える分も host に余裕を確保 |
+| Settings → Display | Graphics Controller は VMSVGA。表示不調時に 3D acceleration の有無を切り分ける |
+| Settings → Network | Adapter 1 を有効、Attached to は **NAT**、Cable Connected を有効。追加 adapter／port forwarding は不要 |
+| Start → Ubuntu installer | 日本語または英語、keyboard を確認して通常インストール。ユーザー `kishino`、hostname 例 `inception-vm`、password は本人が管理 |
+| Storage の確認 | インストール先は **この新規 VM の仮想ディスク**。guest の `/` に 40 GiB 程度を割当。LVM 利用時も root の実容量を確認 |
+| インストール完了 | 再起動の指示で ISO を取り外す。戻ってしまう場合は VM 停止後 Settings → Storage から光学ドライブの ISO を外す |
+
+Ubuntu の desktop にログインし、Terminal と **VM 内 Firefox** が開けば OS 導入完了。
+リポジトリ・DB は VM 内の Linux filesystem に置く。VirtualBox 共有フォルダへ直接 DB を置かない。
+
+**口頭説明：**「校舎 Ubuntu は VirtualBox を動かす host、VM 内 Ubuntu は Docker の host です。各 container のベースは `debian:12`。ブラウザも VM 内なので、NAT の inbound 転送や校舎 host の hosts 編集なしで `https://kishino.42.fr` を確認できます。」
+
+### VM-2. 時計・容量・外向き通信を整える
+
+```sh
+cat /etc/os-release
+uname -m
+id -un
+free -h
+df -h /
+df -i /
+ip -4 addr show scope global
+ip route
+timedatectl status
+sudo timedatectl set-ntp true
+sudo apt update
+sudo apt install -y ca-certificates curl git make openssl ripgrep nano
+curl -fsSI https://github.com
+timedatectl show -p NTPSynchronized --value
+```
+
+**期待結果：** Ubuntu 24.04、`x86_64`、ユーザー `kishino`、`/` の空き 15 GiB 以上を目安に確保。
+VM に IP と default route があり、時計が正しく同期（最後の出力 `yes`）し、APT と HTTPS が成功する。初回 build はネットワーク接続が必要。
+`certificate is not yet valid`／`expired` は snapshot 復帰後の時計ずれでも起こる。まず現在時刻と NTP を直し、`curl -k` で package／Git の証明書検証を回避しない。
+ディスク全体を 50 GiB にしても `/` が小さければ空き不足になる。`lsblk` と `df -h /` の両方で確認する。
+
+### 操作を快適にする：Guest Additions（任意）
+
+画面サイズ追従やコピー＆ペーストが必要なら、[Guest Additions](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/guestadditions.html) を **VM 内**に導入する。
+既に動くなら再導入不要。VirtualBox 本体と同じ版の付属 CD を使い、Ubuntu package 版と無計画に重ねない。課題の必須 service ではない。
+
+```sh
+sudo apt install -y build-essential dkms "linux-headers-$(uname -r)"
+```
+
+VM ウィンドウの Devices → Insert Guest Additions CD Image を選び、Files で CD を開く。
+そのディレクトリで「Open in Terminal」を選び、`VBoxLinuxAdditions.run` があることを確認して実行する。
+
+```sh
+sudo sh ./VBoxLinuxAdditions.run
+sudo reboot
+```
+
+再ログイン後、Devices → Shared Clipboard → Bidirectional を選び、**秘密ではない短い文字列**で双方向コピーを確認する。
+解像度は VM ウィンドウの拡大で追従するか確認。clipboard は切り分け用の補助機能で、失敗しても VM 内 Firefox からこの教材を開いて操作できる。
+Terminal は `Ctrl+Alt+T`、貼付けは `Ctrl+Shift+V`。host にマウス・keyboard を戻すキーは VM ウィンドウ右下の Host Key 表示を確認する（通常 Right Ctrl）。
+
+### VM-3. Docker Engine と Compose plugin を入れる
+
+まず `docker version` と `docker compose version` が既に成功するなら、既存環境を確認して下の重複インストールを省く。
+以下は **新規 Ubuntu VM** 向けの [Docker 公式 APT 手順](https://docs.docker.com/engine/install/ubuntu/)（2026-09-08 確認）。
+既存の `docker.io`／旧 `docker-compose`／`podman-docker`／`containerd` 等がある環境では公式の競合 package 一覧を確認してから移行する。
+
+```sh
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF_DOCKER
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF_DOCKER
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker containerd
+sudo usermod -aG docker "$USER"
+```
+
+**一度ログアウトして再ログイン**し、新しい group を反映してから次を実行する。`docker` group は root 相当の権限なので本人の評価用ユーザーだけに付与する。
+
+```sh
+id -nG
+systemctl is-enabled docker containerd
+systemctl is-active docker containerd
+docker context show
+docker context inspect default --format '{{.Endpoints.docker.Host}}'
+docker version
+docker compose version
+docker run --rm hello-world
+```
+
+**期待結果：** group に `docker`、両 service が enabled／active、`sudo` なしで client と server の version が表示される。
+新規 VM の context は `default`、endpoint は `unix:///var/run/docker.sock`。意図せず校舎 host／remote Docker を操作していないことを確認する。
+`hello-world` の成功は Engine の導入確認で、Inception の自作 image 要件を代替しない。評価開始時には §2 の専用 VM cleanup を行う。
+
+### VM-4. 提出コード・data の置き場所を揃える
+
+GitHub は準備用。**本番評価では Intra に表示される提出 repository URL に置き換える。** SSH 認証が必要なら本人の既存認証を使い、秘密鍵を Git や共有フォルダへ入れない。
+
+```sh
+repo_url='https://github.com/Kizuna42/inception.git'
+eval_parent=$(mktemp -d "$HOME/inception-eval.XXXXXX")
+git clone "$repo_url" "$eval_parent/inception"
+cd "$eval_parent/inception"
+git status -sb
+git log -1 --format='%H %s'
+printf '評価で使うリポジトリ: %s\n' "$PWD"
+```
+
+提出対象 SHA と一致することを確認し、この **絶対 path を控える**。再ログイン後は同じ clone に戻る。
+この教材の最新版が準備用 clone に必要なら `git switch codex/inception-defense-cheatsheet`。本番では提出対象 branch／SHA を優先する。
+
+```sh
+grep -E '^(DOMAIN_NAME|DATA_PATH|MYSQL_DATABASE|MYSQL_USER)=' srcs/.env
+grep '^DATA_PATH' Makefile
+docker ps -a --format '{{.Names}}'
+docker volume ls --format '{{.Name}}'
+```
+
+**期待結果：** `DATA_PATH=/home/kishino/data` が `.env` と Makefile で一致すること。
+`nginx`／`wordpress`／`mariadb` や同名 volume が既にあれば、新規 build 前に所有元と `docker volume inspect` の `Options.device` を確認する。
+別 clone が同じ固定名を使っている場合、単に別ディレクトリへ clone しても環境は隔離されない。評価用に一つの stack だけを動かす。
+`make` が data ディレクトリと secret を作るので手作業で password をソースへ書かない。権限エラーを `chmod -R 777` で解決しない。
+
+### VM-5. VM 内の名前解決とブラウザを設定する
+
+`sudo nano /etc/hosts` で `kishino.42.fr` の既存行を重複させず、次の 1 行に揃える。
+
+```text
+127.0.0.1 kishino.42.fr
+```
+
+```sh
+getent hosts kishino.42.fr
+```
+
+**期待結果：** VM 内で `127.0.0.1` に解決される。stack 起動後、同じ **VM 内 Firefox** で `https://kishino.42.fr` を開く。
+自己署名の警告は「詳細設定」から証明書を確認して進む。VM 画面の外にある校舎 host の Firefox と取り違えない。
+[NAT](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/networkingdetails.html) は VM から APT／Git 等への通信に使い、ブラウザ → VM の 443 → NGINX は VM 内で完結する。
+校舎 host から guest の NAT 内 IP への直接到達は前提にしない。Docker network `inception` はさらに内側の container 間通信用。
+
+**再起動で hosts が消える場合だけ：** cloud-init の管理設定と `/etc/hosts` 冒頭を確認する。
+
+```sh
+grep -n 'manage_etc_hosts' /etc/cloud/cloud.cfg /etc/cloud/cloud.cfg.d/*.cfg 2>/dev/null
+```
+
+`manage_etc_hosts: true` なら `/etc/hosts` が指示する生成元 template を編集し、同じドメイン行を追加する。
+Ubuntu では通常 `/etc/cloud/templates/hosts.debian.tmpl`。hostname 用の変数を消さない。
+cloud-init がない場合や管理が false の場合は不要。いずれも §12 の再起動後に `getent hosts` を再実行して保持を確認する。
+
+### VM-6. 「準備完了」の判定 — build と再起動を実測する
+
+§0 の関数を定義し、§1〜2 の提出確認・fresh build、§6〜11 の HTTPS／TLS／ブラウザ／DB を実演する。
+§10 でページ編集とコメントを作り、§12 の **VM 再起動後にも**次を確認する。snapshot の再開だけを VM 再起動の代わりにしない。
+
+| 確認 | 完了条件 |
+|---|---|
+| OS／Docker 起動 | ISO に戻らずログインでき、`systemctl is-active docker` が active、`docker ps` が sudo なしで成功 |
+| 時刻・通信・容量 | 時計が正しく、Git／APT の HTTPS が通り、build 用の空き容量がある |
+| 提出元 | 正式な clone と SHA、控えた path が一致し、別 clone の stack で結果を代用していない |
+| 名前解決 | VM 内 `getent hosts` が `127.0.0.1` を返し、VM 内 Firefox で同じ URL を開ける |
+| 起動・永続化 | `make` 後に 3 service が動き、両 volume の保存先が正しく、編集・コメント・DB が残る |
+| 実ブラウザ | HTTPS の公開 page と管理画面が使え、HTTP:80 では接続できない |
+
+完了後は `sudo shutdown -h now` で正常終了し、必要なら停止済み VM を VirtualBox の Clone／Export Appliance で本人の保存先へ保存する。
+VM のコピーには DB とローカル secret も含まれるため本人の保管先を使い、Git へ追加しない。
+保存状態（Save the machine state）や強制電源断を通常の shutdown にしない。別の校舎 PC に移す場合は import 後にもこの表を再確認する。
+当日は同じ VM を起動してこの表を再確認する。**この手順を読んだだけでは VM 完成ではなく、表の実測が完了条件。**
+
+| 困ったとき | 最初の切り分け |
+|---|---|
+| `permission denied`（Docker socket） | 再ログイン済みか、`id -nG` に docker があるか。socket を全員書込可にしない |
+| `Cannot connect to the Docker daemon` | `systemctl status docker --no-pager`、context と `DOCKER_HOST`／`DOCKER_CONTEXT` の設定を確認 |
+| `No space left on device` | `df -h /` と `df -i /`、`docker system df`。容量と inode を区別し、全データ削除で隠さない |
+| curl は通るが Firefox では失敗 | **VM 内** Firefox か、HTTPS か、自己署名警告・browser の proxy 設定を確認 |
+| 再起動後だけ domain が消える | cloud-init の hosts 管理と生成元 template を確認 |
+
+**VirtualBox 自体が起動しない場合：** `VT-x/AMD-V is not available`、`Kernel driver not installed` 等は校舎 host 側の問題。
+エラー全文を控え、校舎管理者へ確認する。本人の判断で host の BIOS・kernel module・VirtualBox package を変更しない。
+
 ## 0. 読み方と実演の前提
 
 コマンドは **Linux 評価 VM のリポジトリルート**で実行する。`$` は付けずにコピーできる。
@@ -185,7 +393,7 @@ wp core is-installed
 
 **口頭説明：**「入口を nginx の 443 に限定しています。80 は redirect 用にも開けていません。証明書は自己署名なので、ブラウザ警告は想定内です。」
 
-**周辺知識：** VM 内ブラウザなら `/etc/hosts` の `127.0.0.1 kishino.42.fr`、ホスト側ブラウザならホスト側で VM の IP に対応させる。
+**周辺知識：** 本手順は VM 内 Firefox を使い、VM 内 `/etc/hosts` の `127.0.0.1 kishino.42.fr` で解決する。
 `curl -k` は証明書検証を省略するが通信の暗号化は続く。名前解決だけ切り分ける場合は `--resolve kishino.42.fr:443:127.0.0.1` を使えるが、通常のブラウザ用名前解決の確認も必要。
 
 ## 7. Docker Basics — 自作 image・build・プロセス
