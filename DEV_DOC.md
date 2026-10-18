@@ -211,3 +211,42 @@ Because every step is guarded by an existence/state check, restarting the
 containers (`make down` followed by `make`) re-runs the same entrypoints
 without re-downloading, reinstalling, or duplicating data — the scripts are
 idempotent with respect to the persisted volumes.
+
+## Verify the current source without provisioning
+
+Use Python 3.10 or later. From any directory, pass the actual Git root, its
+expected full commit SHA, and a new output directory outside the repository.
+The output directory's parent must already exist.
+
+```sh
+python3 /path/to/inception/scripts/verify-current.py \
+	--repo /path/to/inception \
+	--expected-sha "$(git -C /path/to/inception rev-parse HEAD)" \
+	--output /path/to/evidence/new-source-check
+```
+
+The default checks HEAD, tracked index and worktree changes, required source
+files, tracked secret paths, and both entrypoints' shell syntax. Git clean,
+smudge, and process filters are disabled for these read-only checks. It ignores
+untracked audit artifacts and does not require Docker. It writes `result.json`
+inside the new output directory. Exit 0 means that all requested checks passed.
+Exit 1 means that a requested check failed or was unavailable. Exit 2 rejects
+invalid inputs or an unsafe output destination. Existing output is never reused.
+
+To validate Compose without rendering its configuration, add `--validate-compose`.
+To observe existing `inception` project services, add `--observe-runtime`.
+A requested observation fails if Docker or the required containers are absent,
+stopped, unhealthy, or labeled for another project. Each external command has a
+10-second timeout and a 64 KiB combined output limit. Diagnostics omit raw command
+output. The verifier does not start containers, execute entrypoints, call `make`,
+change VM state, send HTTP requests, or compare persisted content.
+
+Source-only success does not prove that running images match the source SHA.
+Image-source correspondence and persistence through restart remain unverified.
+The historical `output/` and `.audit/` artifacts remain separate evidence.
+
+Run the CLI fixture tests with the standard library.
+
+```sh
+python3 -m unittest discover -s /path/to/inception/tests -p test_verify_current.py
+```
