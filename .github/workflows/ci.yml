@@ -96,16 +96,33 @@ jobs:
           code=$(probe "https://$DOMAIN/wp-login.php")
           echo "GET /wp-login.php -> $code"
           test "$code" = 200
-          # TLS 1.2 and 1.3 are accepted; TLS 1.1 and older are rejected.
+          # TLS 1.2 and 1.3 are accepted; TLS 1.1 and 1.0 are rejected.
           probe --tlsv1.2 --tls-max 1.2 "https://$DOMAIN/" >/dev/null
           probe --tlsv1.3 "https://$DOMAIN/" >/dev/null
-          if openssl s_client -connect 127.0.0.1:443 -servername "$DOMAIN" -tls1_1 </dev/null >/dev/null 2>&1; then
-            echo "TLS 1.1 unexpectedly accepted" >&2
-            exit 1
-          fi
+          # OpenSSL 3 refuses to offer TLS <= 1.1 at the default security level and
+          # fails locally ("no protocols available"), so lower it to make the client
+          # really send the old ClientHello; only a server refusal then counts.
+          sclient() {
+            openssl s_client -connect 127.0.0.1:443 -servername "$DOMAIN" \
+              -cipher 'DEFAULT:@SECLEVEL=0' "$@" </dev/null 2>&1
+          }
+          sclient -tls1_2 | grep -q 'Protocol *: *TLSv1.2'
+          for proto in -tls1 -tls1_1; do
+            if out=$(sclient "$proto"); then
+              echo "$proto unexpectedly accepted" >&2
+              exit 1
+            fi
+            if echo "$out" | grep -q 'no protocols available'; then
+              echo "client could not offer $proto; the check would be meaningless" >&2
+              exit 1
+            fi
+            echo "$proto refused by the server"
+          done
           # Only 443 is published to the host.
           docker compose -f srcs/docker-compose.yml ps --format '{{.Service}} {{.Publishers}}'
-          test "$(docker port nginx)" != ""
+          docker port nginx
+          test "$(docker port nginx | awk '{print $1}' | sort -u)" = "443/tcp"
+          test -z "$(docker port nginx | awk '{print $3}' | grep -v ':443$' || true)"
           test -z "$(docker port wordpress)"
           test -z "$(docker port mariadb)"
           if curl -s -o /dev/null --max-time 5 http://127.0.0.1:80/; then
@@ -116,13 +133,22 @@ jobs:
       - name: WordPress users and persistence across restart
         run: |
           set -eu
+          wpcli() {
+            docker exec wordpress wp --allow-root --path=/var/www/html "$@"
+          }
+          # IDs and registration times change on a reinstall, unlike the logins
+          # that the entrypoints recreate from srcs/.env.
           users() {
-            docker exec wordpress wp user list --field=user_login --allow-root --path=/var/www/html | sort | tr '\n' ' '
+            wpcli user list --fields=ID,user_login,user_registered --format=csv | sort
           }
           before=$(users)
           echo "users: $before"
-          echo "$before" | grep -qw kishino
-          echo "$before" | grep -qw guest
+          echo "$before" | grep -q ',kishino,'
+          echo "$before" | grep -q ',guest,'
+          # A marker post only survives if the database itself was persisted.
+          marker="ci-persistence-${GITHUB_RUN_ID:-local}-$(date +%s)"
+          post_id=$(wpcli post create --post_title="$marker" --post_status=publish --porcelain)
+          echo "marker post $post_id: $marker"
           make down
           make up DATA_PATH="$DATA_PATH"
           for i in $(seq 1 60); do
@@ -132,6 +158,7 @@ jobs:
           after=$(users)
           echo "users after restart: $after"
           test "$before" = "$after"
+          test "$(wpcli post get "$post_id" --field=post_title)" = "$marker"
 
       - name: Logs on failure
         if: failure()

@@ -261,5 +261,6 @@ checked-out commit. The `e2e` job then runs `make up` with
 `DATA_PATH=/tmp/inception-data`, waits for the health checks, probes
 `https://kishino.42.fr` through `curl --resolve`, checks that only TLS 1.2/1.3
 are accepted and only port 443 is published, confirms both WordPress accounts
-exist, and verifies they survive `make down` followed by `make up`. Every run
+exist, and verifies that they (by ID and registration time) and a marker post
+created before the restart survive `make down` followed by `make up`. Every run
 ends with `make fclean`. Secrets generated in CI are random and discarded.
