@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static checks and verifier tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verifier unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Shell syntax and ShellCheck
+        run: |
+          for script in srcs/requirements/*/tools/*.sh; do
+            sh -n "$script"
+          done
+          shellcheck -S warning srcs/requirements/*/tools/*.sh
+
+      - name: Generate throwaway secrets
+        run: make secrets
+
+      - name: Compose configuration
+        run: docker compose -f srcs/docker-compose.yml config --quiet
+
+      - name: Source verifier on this commit
+        run: |
+          python3 scripts/verify-current.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --expected-sha "$(git rev-parse HEAD)" \
+            --output "$RUNNER_TEMP/verify-source" \
+            --validate-compose
+
+  e2e:
+    name: Build, start and probe the stack
+    runs-on: ubuntu-24.04
+    needs: static
+    timeout-minutes: 30
+    env:
+      DATA_PATH: /tmp/inception-data
+      DOMAIN: kishino.42.fr
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start (make up)
+        run: make up DATA_PATH="$DATA_PATH"
+
+      - name: Wait for healthy services
+        run: |
+          for i in $(seq 1 60); do
+            states=$(docker inspect --format '{{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' mariadb wordpress nginx)
+            echo "$states"
+            if [ "$(echo "$states" | grep -c ' running healthy')" -eq 2 ] \
+              && echo "$states" | grep -q '^/nginx running'; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose -f srcs/docker-compose.yml logs
+          exit 1
+
+      - name: Probe HTTPS, TLS policy and exposed ports
+        run: |
+          set -eu
+          probe() {
+            curl -sk --resolve "$DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "$@"
+          }
+          code=""
+          for i in $(seq 1 30); do
+            code=$(probe "https://$DOMAIN/" || true)
+            [ "$code" = 200 ] && break
+            sleep 2
+          done
+          echo "GET / -> $code"
+          test "$code" = 200
+          curl -sk --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/" | grep -qi 'wordpress\|wp-content'
+          code=$(probe "https://$DOMAIN/wp-login.php")
+          echo "GET /wp-login.php -> $code"
+          test "$code" = 200
+          # TLS 1.2 and 1.3 are accepted; TLS 1.1 and older are rejected.
+          probe --tlsv1.2 --tls-max 1.2 "https://$DOMAIN/" >/dev/null
+          probe --tlsv1.3 "https://$DOMAIN/" >/dev/null
+          if openssl s_client -connect 127.0.0.1:443 -servername "$DOMAIN" -tls1_1 </dev/null >/dev/null 2>&1; then
+            echo "TLS 1.1 unexpectedly accepted" >&2
+            exit 1
+          fi
+          # Only 443 is published to the host.
+          docker compose -f srcs/docker-compose.yml ps --format '{{.Service}} {{.Publishers}}'
+          test "$(docker port nginx)" != ""
+          test -z "$(docker port wordpress)"
+          test -z "$(docker port mariadb)"
+          if curl -s -o /dev/null --max-time 5 http://127.0.0.1:80/; then
+            echo "port 80 unexpectedly reachable" >&2
+            exit 1
+          fi
+
+      - name: WordPress users and persistence across restart
+        run: |
+          set -eu
+          users() {
+            docker exec wordpress wp user list --field=user_login --allow-root --path=/var/www/html | sort | tr '\n' ' '
+          }
+          before=$(users)
+          echo "users: $before"
+          echo "$before" | grep -qw kishino
+          echo "$before" | grep -qw guest
+          make down
+          make up DATA_PATH="$DATA_PATH"
+          for i in $(seq 1 60); do
+            [ "$(docker inspect --format '{{.State.Health.Status}}' wordpress)" = healthy ] && break
+            sleep 5
+          done
+          after=$(users)
+          echo "users after restart: $after"
+          test "$before" = "$after"
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -f srcs/docker-compose.yml logs --no-color || true
+
+      - name: Tear down (make fclean)
+        if: always()
+        run: make fclean DATA_PATH="$DATA_PATH" || true
