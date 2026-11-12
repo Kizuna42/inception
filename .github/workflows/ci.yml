@@ -106,14 +106,24 @@ jobs:
             openssl s_client -connect 127.0.0.1:443 -servername "$DOMAIN" \
               -cipher 'DEFAULT:@SECLEVEL=0' "$@" </dev/null 2>&1
           }
-          sclient -tls1_2 | grep -q 'Protocol *: *TLSv1.2'
+          # Positive control: the same call must complete a TLS 1.2 handshake
+          # (exit 0 and a negotiated cipher), not just print the attempted version.
+          if ! out=$(sclient -tls1_2) \
+            || ! echo "$out" | grep -Eq '^New, TLSv1\.2, Cipher is [A-Z0-9]'; then
+            echo "$out" >&2
+            echo "TLS 1.2 control handshake did not complete; the checks below would be meaningless" >&2
+            exit 1
+          fi
           for proto in -tls1 -tls1_1; do
             if out=$(sclient "$proto"); then
               echo "$proto unexpectedly accepted" >&2
               exit 1
             fi
-            if echo "$out" | grep -q 'no protocols available'; then
-              echo "client could not offer $proto; the check would be meaningless" >&2
+            # Only a protocol_version alert from the server counts as a refusal;
+            # client-side errors (unknown option, no protocols available, ...) fail.
+            if ! echo "$out" | grep -q 'alert protocol version'; then
+              echo "$out" >&2
+              echo "$proto failed without a protocol_version alert from the server" >&2
               exit 1
             fi
             echo "$proto refused by the server"
