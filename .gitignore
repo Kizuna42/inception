@@ -4,3 +4,6 @@ secrets/
 # Local runtime artifacts
 *.log
 .DS_Store
+
+# Python bytecode from running the verifier tests
+__pycache__/
